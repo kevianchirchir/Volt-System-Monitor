@@ -18,6 +18,14 @@ Monitor your hardware in real time, explore system statistics, and keep an eye o
   <em>Volt's real-time monitoring dashboard</em>
 </p>
 
+<p align="center">
+  <<img width="1920" height="1080" alt="layers" src="https://github.com/user-attachments/assets/a2b4003e-c897-4fa9-89f4-d7b9e35304d7" />
+  <br />
+  <em>Customize Volt however you desire :D </em>
+</p>
+
+
+
 Features
 
   CPU Monitoring — Track processor utilization in real time.
