@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VOLT | System Monitor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="splash"><div class="orb"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="48" pathLength="100"/><circle cx="50" cy="50" r="48" pathLength="100" style="transform:rotate(180deg)"/></svg><span>VOLT</span></div></div>
+
+<div class="app">
+  <div class="bar pywebview-drag-region" ondblclick="api('toggle_max')">
+    <span>VOLT &nbsp;·&nbsp; System Monitor</span>
+    <div class="win">
+      <button onclick="api('minimize')" aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></button>
+      <button onclick="api('toggle_max')" aria-label="Maximize"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></button>
+      <button class="x" onclick="api('close')" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+    </div>
+  </div>
+
+  <div class="body">
+    <aside>
+      <div class="logo">VOLT</div>
+      <div class="tag">SYSTEM MONITOR</div>
+      <nav id="nav"></nav>
+      <div class="ver">Volt v1.2.0</div>
+    </aside>
+
+    <main>
+      <section class="page" id="p-Overview">
+        <h1>System Overview</h1>
+        <div class="row c3">
+          <div class="card gc" data-g="cpu" data-t="CPU" data-c="Processor load"></div>
+          <div class="card gc" data-g="mem" data-t="MEMORY" data-c="RAM in use"></div>
+          <div class="card gc" data-g="disk" data-t="DISK" data-c="Space used"></div>
+        </div>
+        <div class="row c32 fill">
+          <div class="card">
+            <div class="h">NETWORK</div>
+            <div class="stats">
+              <div><div class="h"><i class="dot"></i>DOWNLOAD</div><div class="big med" data-s="down">0 B/s</div></div>
+              <div><div class="h"><i class="dot up"></i>UPLOAD</div><div class="big med up-s" data-s="up">0 B/s</div></div>
+            </div>
+            <div class="chart" data-chart="net"></div>
+          </div>
+          <div class="card"><div class="h">SYSTEM</div><div class="rows" data-rows="sys|Operating System,Architecture,Processor,Installed RAM"></div></div>
+        </div>
+      </section>
+
+      <section class="page" id="p-Processor">
+        <h1>Processor</h1>
+        <div class="row c12">
+          <div class="card gc" data-g="cpu" data-t="CPU" data-c="Total load"></div>
+          <div class="card"><div class="h">LOAD HISTORY</div><div class="chart" data-chart="cpu"></div></div>
+        </div>
+        <div class="card" style="flex:1">
+          <div class="h">PROCESSOR</div>
+          <div class="model" data-v="cpu.model">Detecting processor...</div>
+          <div class="row c2" style="gap:36px">
+            <div class="rows tight" data-rows="cpu|Manufacturer,Socket,Cores / threads,Architecture"></div>
+            <div class="rows tight" data-rows="cpu|Current speed,Rated speed,Cache (L2 / L3),Processes"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" id="p-Memory">
+        <h1>Memory</h1>
+        <div class="row c12">
+          <div class="card gc" data-g="mem" data-t="MEMORY" data-c="RAM in use"></div>
+          <div class="card"><div class="h">USAGE HISTORY</div><div class="chart" data-chart="mem"></div></div>
+        </div>
+        <div class="row c2 fill">
+          <div class="card"><div class="h">PHYSICAL MEMORY</div><div class="rows" data-rows="ram|Total,Used,Available"></div></div>
+          <div class="card"><div class="h">SWAP / PAGE FILE</div><div class="rows" data-rows="swap|Total,Used,Usage"></div></div>
+        </div>
+      </section>
+
+      <section class="page" id="p-Graphics">
+        <h1>Graphics</h1>
+        <div class="row c12">
+          <div class="card gc" data-g="gpu" data-t="GPU" data-c="Graphics load"></div>
+          <div class="card"><div class="h">LOAD HISTORY</div><div class="chart" data-chart="gpu"></div></div>
+        </div>
+        <div class="card"><div class="h">DETAILS</div><div class="rows" data-rows="gpu|Graphics card,Video memory,Temperature,Telemetry"></div></div>
+        <p class="notice" data-v="gpu.notice"></p>
+      </section>
+
+      <section class="page" id="p-Network">
+        <h1>Network</h1>
+        <div class="row c2">
+          <div class="card"><div class="h"><i class="dot"></i>DOWNLOAD</div><div class="big" data-s="down">0 B/s</div><div class="sub" id="dsub"></div></div>
+          <div class="card"><div class="h"><i class="dot up"></i>UPLOAD</div><div class="big up-s" data-s="up">0 B/s</div><div class="sub" id="usub"></div></div>
+        </div>
+        <div class="row c32 fill">
+          <div class="card"><div class="h">TRAFFIC</div><div class="chart" data-chart="net"></div></div>
+          <div class="card"><div class="h">ACTIVE ADAPTERS</div><div class="rows" id="ifaces"></div></div>
+        </div>
+      </section>
+
+      <section class="page" id="p-Settings">
+        <h1>Settings</h1>
+        <div class="card" style="flex:0 0 auto">
+          <div class="h">ACCENT COLOR</div>
+          <div class="sub" style="margin-top:2px">Recolors the glowing text, rings and charts. Changes preview live; press Save to keep them.</div>
+          <div class="sw" id="sw"></div>
+          <div class="sl"><span>Hue</span><input type="range" id="sh" min="0" max="1000"></div>
+          <div class="sl"><span>Saturation</span><input type="range" id="ss" min="0" max="1000"></div>
+          <div class="sl"><span>Brightness</span><input type="range" id="sb" min="0" max="1000"></div>
+          <div class="act">
+            <span class="h">HEX</span><input type="text" id="hex" maxlength="7">
+            <span class="sp" id="status">Saved</span>
+            <button class="btn" id="reset">Reset</button><button class="btn p" id="save">Save</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
