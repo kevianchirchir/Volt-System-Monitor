@@ -607,7 +607,7 @@ async function poll() {
         // Update system information fields
         $$("[data-v]").forEach(element => {
 
-            const value = stats.d[element.dataset.v];
+            const value = stats.netstats[element.dataset.v];
 
             if (value !== undefined) {
                 element.textContent = value;
@@ -618,10 +618,10 @@ async function poll() {
 
         // Update network summaries
         $("#dsub").textContent =
-            `Total received  ${stats.d["net.recv"]}     Peak  ${speed(peak.down)}`;
+            `Total received  ${stats.netstats["net.recv"]}     Peak  ${speed(peak.down)}`;
 
         $("#usub").textContent =
-            `Total sent  ${stats.d["net.sent"]}     Peak  ${speed(peak.up)}`;
+            `Total sent  ${stats.netstats["net.sent"]}     Peak  ${speed(peak.up)}`;
 
 
         // Update network interfaces

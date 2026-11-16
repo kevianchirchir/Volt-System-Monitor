@@ -12,6 +12,13 @@ class SystemMonitor:
     def get_disk_usage(self):
         return psutil.disk_usage("C:\\").percent
     
+    def get_total_memory(self):
+        return psutil.virtual_memory().total
     
+    def get_cpu_frequency(self):
+        return psutil.cpu_freq()
 
+    def get_core_count(self):
+        return psutil.cpu_count()
      
+print(psutil.sensors_)

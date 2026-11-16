@@ -85,10 +85,9 @@ class Api:
         down = max(0.0, (recv - self._recv) / dt)
         self._sent, self._recv, self._t = sent, recv, now
 
-        # "d" holds text for the detail rows. The key is "<group>.<row label>",
-        # e.g. d["ram.Total"] = "16.0 GB" fills the Total row on the Memory page.
+        # "netstats" holds text for the detail rows, keyed by group and row label.
         # Any row you don't fill in just shows "-".
-        d = {
+        netstats = {
             "net.recv": byte_conversion(recv),
             "net.sent": byte_conversion(sent),
         }
@@ -97,10 +96,10 @@ class Api:
             "cpu": num(self._sys.get_cpu_usage()),
             "mem": num(self._sys.get_memory_usage()),
             "disk": num(self._sys.get_disk_usage()),
-            "gpu": num(self._gpu.get_gpu_usage),        # add your own GPU reading here
+            "gpu": num(self._gpu.get_gpu_usage()),
             "down": down,      # bytes per second
             "up": up,
-            "d": d,
+            "netstats": netstats,
             "ifaces": [],      # add [["Wi-Fi", "192.168.1.5"], ...] for the adapter list
         }
 

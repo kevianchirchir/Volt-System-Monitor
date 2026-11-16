@@ -18,7 +18,3 @@ class GPUMonitor:
     
 game = GPUMonitor()
 
-print(game.get_gpu_usage())
-print(game.get_gpu_temperature())
-print(game.get_gpu_memory().total / 1048576)
-
