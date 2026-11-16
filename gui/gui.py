@@ -1,3 +1,4 @@
+import colorsys
 import ctypes
 import json
 import math
@@ -5,6 +6,7 @@ import os
 import platform
 import re
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -21,72 +23,105 @@ from monitoring.network import NetworkMonitor
 sys = SystemMonitor()
 net = NetworkMonitor()
 
+# Appearance
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# ---------- typography ----------
-# SF Pro is used when installed; otherwise the closest system font.
-FONT_CANDIDATES = ("SF Pro Display", "SF Pro Text", "Segoe UI Variable Display",
-                   "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue",
-                   "Helvetica", "Arial")
-FONT = "Segoe UI"
-BOLD = "bold"
+# ---------- custom font ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_PATH = os.path.join(BASE_DIR, "fonts", "sharkgotyourhand.ttf")
 
-# ---------- palette: iOS dark mode ----------
+
+def read_font_family(path):
+    """Read the family name stored inside a .ttf/.otf file, because Tk needs
+    that name - which is often different from the file name."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        if data[:4] == b"ttcf":          # font collections aren't handled
+            return None
+        tables = struct.unpack(">H", data[4:6])[0]
+        name_off = None
+        for i in range(tables):
+            rec = 12 + i * 16
+            if data[rec:rec + 4] == b"name":
+                name_off = struct.unpack(">I", data[rec + 8:rec + 12])[0]
+                break
+        if name_off is None:
+            return None
+        _, count, str_off = struct.unpack(">HHH", data[name_off:name_off + 6])
+        found = {}
+        for i in range(count):
+            rec = name_off + 6 + i * 12
+            plat, _enc, _lang, name_id, length, off = struct.unpack(
+                ">HHHHHH", data[rec:rec + 12])
+            if name_id not in (1, 16):    # 1 = family, 16 = typographic family
+                continue
+            start = name_off + str_off + off
+            raw = data[start:start + length]
+            text = raw.decode("utf-16-be" if plat in (0, 3) else "latin-1",
+                              errors="ignore").strip()
+            if text and (name_id not in found or plat == 3):
+                found[name_id] = text
+        return found.get(1) or found.get(16)
+    except Exception:
+        return None
+
+
+FONT_LOADED = ctk.FontManager.load_font(FONT_PATH)
+
+# Global font configuration
+FONT = read_font_family(FONT_PATH) or "sharkgotyourhand"
+ICON_FONT = "Segoe MDL2 Assets"   # title-bar glyphs need an icon font
+BOLD = "bold"                     # set to "normal" if the font looks smeared when bolded
+
+# ---------- palette: black & accent ----------
+accent_color = "#FFFFFF"  # splash rings / arcs (the splash *text* uses the saved accent)
 TEXT = "#FFFFFF"
-MUTED = "#8E8E93"        # secondary label
-DIM = "#636366"          # tertiary label
-BG = "#000000"           # system background
-CARD = "#1C1C1E"         # secondary grouped background
-CARD_HI = "#2C2C2E"
-SEP = "#38383A"          # separators
-GRID = "#2C2C2E"
-BORDER = "#2C2C2E"
+MUTED = "#8C8C8C"
+DIM = "#4D4D4D"
 
-IOS_BLUE = "#0A84FF"
-IOS_GREEN = "#30D158"
-IOS_ORANGE = "#FF9F0A"
-IOS_PINK = "#FF375F"
-IOS_PURPLE = "#BF5AF2"
-IOS_TEAL = "#64D2FF"
-IOS_YELLOW = "#FFD60A"
-IOS_GRAY = "#8E8E93"
+BG = "#050505"            # app background
+PANEL = "#0B0B0B"         # sidebar / title bar
+CARD = "#0E0E0E"          # cards
+BORDER = "#1C1C1C"
+TRACK = "#1E1E1E"         # empty part of gauge rings
+GRID = "#171717"          # chart grid lines
+TRANSPARENT = "#010203"   # colour key: pixels of this colour are see-through on Windows
 
-# ---------- animation timing ----------
-SPLASH_IN = 0.7          # icon springs in
-SPLASH_OUT_AT = 1.65     # icon zooms away
-SPLASH_OUT_S = 0.45
-SPLASH_TOTAL = SPLASH_OUT_AT + SPLASH_OUT_S
-FRAME_MS = 8
+# Splash animation timing (frames are ~15 ms each)
+GROW_FRAMES = 30      # circle blooms in
+HOLD_FRAMES = 25      # circle pulses + spinner orbits
+MORPH_FRAMES = 45     # circle flows into the full window box
+CURTAIN_FRAMES = 20   # box slides away to reveal the dashboard
+FRAME_MS = 10
 
-SMOOTHING = 5.0          # higher = values catch up faster
-HISTORY = 45
-FRAME_DELAY = 16         # ~60 fps animation loop
-PAGE_SLIDE_S = 0.30
-PAGE_SLIDE_PX = 22
+# Live data
+UPDATE_MS = 1000      # how often real readings are taken
+SMOOTHING = 5.0       # higher = values catch up faster, lower = silkier
+HISTORY = 45          # seconds of history on the charts
+FRAME_DELAY = 16      # ~60 fps animation loop
+PAGE_SLIDE_S = 0.22   # page transition length (seconds)
+PAGE_SLIDE_PX = 18    # how far a page glides in
 
-WINDOW_W, WINDOW_H = 1100, 720
-TITLEBAR_H = 44
-SIDEBAR_W = 232
+WINDOW_W, WINDOW_H = 1100, 700
+TITLEBAR_H = 38
 
 # ---------- saved settings ----------
-DEFAULT_ACCENT = IOS_BLUE
-INTERVALS = (1000, 2000, 5000)
+DEFAULT_ACCENT = "#FFFFFF"
+MIN_BRIGHTNESS = 0.35     # keeps the accent readable on black
 SETTINGS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "volt_settings.json")
 
 
 def load_settings():
-    data = {"accent": DEFAULT_ACCENT, "reduce_motion": False, "interval": 1000}
+    data = {"accent": DEFAULT_ACCENT}
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             saved = json.load(f)
         if re.fullmatch(r"#[0-9a-fA-F]{6}", str(saved.get("accent", ""))):
             data["accent"] = saved["accent"].upper()
-        data["reduce_motion"] = bool(saved.get("reduce_motion", False))
-        if saved.get("interval") in INTERVALS:
-            data["interval"] = saved["interval"]
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
         pass
     return data
 
@@ -101,7 +136,6 @@ def save_settings(data):
 
 
 settings = load_settings()
-UPDATE_MS = settings["interval"]     # how often real readings are taken
 
 
 # ---------- helpers ----------
@@ -114,6 +148,7 @@ def num(x):
 
 
 def format_speed(bytes_per_sec):
+    """Pick a sensible unit so small speeds don't show as 0.00 MB/s."""
     if bytes_per_sec >= 1024 ** 2:
         return f"{bytes_per_sec / 1024 ** 2:.2f} MB/s"
     if bytes_per_sec >= 1024:
@@ -162,10 +197,8 @@ def ease_in_cubic(t):
     return t ** 3
 
 
-def ease_out_back(t, c1=1.70158):
-    """Overshoots slightly then settles - the 'spring' feel."""
-    c3 = c1 + 1
-    return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2
+def ease_in_out_cubic(t):
+    return 4 * t ** 3 if t < 0.5 else 1 - ((-2 * t + 2) ** 3) / 2
 
 
 def hex_to_rgb(h):
@@ -178,22 +211,34 @@ def lerp_color(c1, c2, t):
     r1, g1, b1 = hex_to_rgb(c1)
     r2, g2, b2 = hex_to_rgb(c2)
     return "#%02x%02x%02x" % (
-        int(lerp(r1, r2, t)), int(lerp(g1, g2, t)), int(lerp(b1, b2, t)))
+        int(lerp(r1, r2, t)), int(lerp(g1, g2, t)), int(lerp(b1, b2, t))
+    )
 
 
-def contrast_text(color):
-    r, g, b = hex_to_rgb(color)
-    return "#000000" if (0.299 * r + 0.587 * g + 0.114 * b) > 160 else "#FFFFFF"
+def hsv_to_hex(h, s, v):
+    r, g, b = colorsys.hsv_to_rgb(clamp(h), clamp(s), clamp(v))
+    return "#%02X%02X%02X" % (round(r * 255), round(g * 255), round(b * 255))
 
 
-def rounded_rect_points(cx, cy, w, h, r, steps=10):
+def hex_to_hsv(h):
+    r, g, b = (x / 255 for x in hex_to_rgb(h))
+    return colorsys.rgb_to_hsv(r, g, b)
+
+
+def rounded_rect_points(cx, cy, w, h, r, steps=14):
+    """Polygon points for a rounded rectangle (a true circle when r == w/2 == h/2)."""
     r = max(0, min(r, w / 2, h / 2))
     x1, y1, x2, y2 = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
     if r < 0.5:
         return [x1, y1, x2, y1, x2, y2, x1, y2]
+
     pts = []
-    corners = [(x2 - r, y1 + r, -90), (x2 - r, y2 - r, 0),
-               (x1 + r, y2 - r, 90), (x1 + r, y1 + r, 180)]
+    corners = [
+        (x2 - r, y1 + r, -90),   # top-right
+        (x2 - r, y2 - r, 0),     # bottom-right
+        (x1 + r, y2 - r, 90),    # bottom-left
+        (x1 + r, y1 + r, 180),   # top-left
+    ]
     for ccx, ccy, start in corners:
         for i in range(steps + 1):
             a = math.radians(start + 90 * i / steps)
@@ -201,30 +246,28 @@ def rounded_rect_points(cx, cy, w, h, r, steps=10):
     return pts
 
 
-def smooth_points(pts, sub=4):
-    """Catmull-Rom spline through the points (gives the soft Stocks-app curve)."""
-    n = len(pts)
-    if n < 3:
-        return list(pts)
-    out = []
-    for i in range(n - 1):
-        p0, p1, p2 = pts[max(i - 1, 0)], pts[i], pts[i + 1]
-        p3 = pts[min(i + 2, n - 1)]
-        for k in range(sub):
-            t = k / sub
-            t2, t3 = t * t, t * t * t
-            x = 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t
-                       + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
-                       + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
-            y = 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t
-                       + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
-                       + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
-            out.append((x, y))
-    out.append(pts[-1])
-    return out
+# 12 evenly spaced directions - enough that the glow rings look continuous
+DIRS12 = [(math.cos(k * math.pi / 6), math.sin(k * math.pi / 6))
+          for k in range(12)]
+
+
+def glow_text(c, x, y, text, font, color, bg, strength=1.0, spread=4,
+              step=1.2, anchor="center", tags=()):
+    """Soft glow: `spread` rings of copies around the text, each ring dimmer
+    than the one inside it (quadratic falloff, so there are no hard bands)."""
+    for d in range(spread, 0, -1):          # outermost (faintest) first
+        f = 1 - (d - 1) / spread            # 1.0 for the inner ring
+        col = lerp_color(bg, color, 0.5 * strength * f * f)
+        r = d * step
+        for dx, dy in DIRS12:
+            c.create_text(x + dx * r, y + dy * r, text=text, fill=col,
+                          font=font, anchor=anchor, tags=tags)
+    c.create_text(x, y, text=text, fill=color, font=font, anchor=anchor,
+                  tags=tags)
 
 
 def system_info():
+    """Real machine info for the System card."""
     system = platform.system()
     if system == "Windows":
         try:
@@ -239,6 +282,7 @@ def system_info():
     cores = psutil.cpu_count(logical=False) or psutil.cpu_count()
     threads = psutil.cpu_count()
     ram_gb = psutil.virtual_memory().total / 1024 ** 3
+
     return [
         ("Operating System", os_name),
         ("Architecture", platform.machine() or "-"),
@@ -254,6 +298,8 @@ def _no_window_flags():
 
 
 class CpuInfo:
+    """Looks up the processor model, vendor, socket and cache once."""
+
     def __init__(self):
         self.data = {}
         self.loaded = False
@@ -303,11 +349,13 @@ class CpuInfo:
 
 
 class GpuMonitor:
+    """Reads NVIDIA stats through nvidia-smi. Other GPUs only get a name."""
+
     def __init__(self):
         self.name = None
         self.util = 0.0
-        self.mem_used = 0.0
-        self.mem_total = 0.0
+        self.mem_used = 0.0   # MiB
+        self.mem_total = 0.0  # MiB
         self.temp = 0.0
         self.available = False
 
@@ -355,196 +403,190 @@ class GpuMonitor:
                 time.sleep(15)
 
 
-# ---------- icon drawing ----------
-
-BOLT = ((0.12, -0.5), (-0.28, 0.08), (-0.02, 0.08),
-        (-0.12, 0.5), (0.28, -0.08), (0.02, -0.08))
-
-
-def draw_app_icon(c, cx, cy, size, color, fg="#FFFFFF", tags=()):
-    """The Volt app icon: a squircle with a lightning bolt."""
-    c.create_polygon(rounded_rect_points(cx, cy, size, size, size * 0.225),
-                     fill=color, outline="", tags=tags)
-    pts = []
-    for bx, by in BOLT:
-        pts += [cx + bx * size * 0.62, cy + by * size * 0.62]
-    c.create_polygon(*pts, fill=fg, outline="", tags=tags)
-
-
-def draw_nav_icon(c, kind, cx, cy, size, color):
-    """Colored rounded-square icon with a white glyph (like iOS Settings)."""
-    W = "#FFFFFF"
-    u = size
-    lw = max(1.5, u * 0.065)
-    c.create_polygon(rounded_rect_points(cx, cy, u, u, u * 0.27),
-                     fill=color, outline="")
-    if kind == "overview":
-        for dx in (-1, 1):
-            for dy in (-1, 1):
-                c.create_polygon(
-                    rounded_rect_points(cx + dx * u * 0.15, cy + dy * u * 0.15,
-                                        u * 0.22, u * 0.22, u * 0.05, steps=4),
-                    fill=W, outline="")
-    elif kind == "processor":
-        b = u * 0.2
-        c.create_rectangle(cx - b, cy - b, cx + b, cy + b, outline=W, width=lw)
-        c.create_rectangle(cx - b * 0.45, cy - b * 0.45, cx + b * 0.45,
-                           cy + b * 0.45, fill=W, outline="")
-        for p in (-0.5, 0.5):
-            px, py = cx + p * b, cy + p * b
-            c.create_line(px, cy - b, px, cy - b - u * 0.1, fill=W, width=lw)
-            c.create_line(px, cy + b, px, cy + b + u * 0.1, fill=W, width=lw)
-            c.create_line(cx - b, py, cx - b - u * 0.1, py, fill=W, width=lw)
-            c.create_line(cx + b, py, cx + b + u * 0.1, py, fill=W, width=lw)
-    elif kind == "memory":
-        c.create_rectangle(cx - u * 0.3, cy - u * 0.14, cx + u * 0.3,
-                           cy + u * 0.12, outline=W, width=lw)
-        for k in (-1, 0, 1):
-            c.create_rectangle(cx + k * u * 0.17 - u * 0.05, cy - u * 0.06,
-                               cx + k * u * 0.17 + u * 0.05, cy + u * 0.05,
-                               fill=W, outline="")
-        for i in range(5):
-            x = cx - u * 0.24 + i * u * 0.12
-            c.create_line(x, cy + u * 0.12, x, cy + u * 0.21, fill=W, width=lw)
-    elif kind == "graphics":
-        c.create_rectangle(cx - u * 0.29, cy - u * 0.21, cx + u * 0.29,
-                           cy + u * 0.1, outline=W, width=lw)
-        c.create_line(cx, cy + u * 0.1, cx, cy + u * 0.2, fill=W, width=lw)
-        c.create_line(cx - u * 0.13, cy + u * 0.21, cx + u * 0.13,
-                      cy + u * 0.21, fill=W, width=lw, capstyle="round")
-    elif kind == "network":
-        oy = cy + u * 0.17
-        c.create_oval(cx - u * 0.045, oy - u * 0.045, cx + u * 0.045,
-                      oy + u * 0.045, fill=W, outline="")
-        for r in (0.14, 0.25, 0.36):
-            rr = u * r
-            c.create_arc(cx - rr, oy - rr, cx + rr, oy + rr, start=45,
-                         extent=90, style="arc", outline=W, width=lw)
-    else:  # settings: three sliders
-        for y, kx in ((-0.17, -0.1), (0, 0.12), (0.17, -0.02)):
-            c.create_line(cx - u * 0.26, cy + y * u, cx + u * 0.26,
-                          cy + y * u, fill=W, width=lw * 0.8)
-            kr = u * 0.065
-            c.create_oval(cx + kx * u - kr, cy + y * u - kr,
-                          cx + kx * u + kr, cy + y * u + kr,
-                          fill=W, outline=color, width=lw * 0.5)
-
-
 # ---------- custom canvas widgets ----------
 
-class ValueLabel(ctk.CTkLabel):
-    """Label that skips redraws when the text hasn't changed."""
+class GlowLabel(tk.Canvas):
+    """Label with a soft glow around the text. Colour can change at runtime."""
 
-    def __init__(self, master, text, size, color=TEXT, weight=BOLD, **kw):
-        super().__init__(master, text=text, text_color=color,
-                         font=(FONT, size, weight), **kw)
-        self._shown = text
+    def __init__(self, master, text, size, bg, scale=1.0, width=240,
+                 color=TEXT, weight=BOLD, spread=4, step=1.1,
+                 strength=0.9, anchor="w"):
+        px = max(1, int(size * scale))
+        self.font_t = (FONT, -px, weight)
+        font = tkfont.Font(family=FONT, size=-px, weight=weight)
+        self.font_obj = font
+        self.pad = int(spread * step * scale + 3)
+        self.h = font.metrics("linespace") + self.pad * 2
+        self.w = int(width * scale)
+        super().__init__(master, width=self.w, height=self.h, bg=bg,
+                         highlightthickness=0, bd=0)
+        self.bg_color = bg
+        self.color = color
+        self.spread = spread
+        self.step = step * scale
+        self.strength = strength
+        self.text_anchor = anchor
+        self.cur_text = None
+        self.stale = False          # colour changed while hidden
+        self.last_draw = 0.0
+        self.set_text(text)
+
+    def _render(self):
+        self.stale = False
+        self.delete("all")
+        needed = self.font_obj.measure(self.cur_text) + 2 * self.pad
+        if needed > self.w:               # wider font than planned: widen canvas
+            self.w = needed
+            self.configure(width=needed)
+        x = self.pad if self.text_anchor == "w" else self.w / 2
+        glow_text(self, x, self.h / 2, self.cur_text, self.font_t, self.color,
+                  self.bg_color, self.strength, self.spread, self.step,
+                  anchor=self.text_anchor)
+        self.last_draw = time.perf_counter()
 
     def set_text(self, text):
-        if text != self._shown:
-            self._shown = text
-            self.configure(text=text)
+        if text == self.cur_text and not self.stale:
+            return
+        # throttle: the glow is the expensive part, ~20 redraws/s is plenty
+        if (self.cur_text is not None and not self.stale
+                and time.perf_counter() - self.last_draw < 0.05):
+            return
+        self.cur_text = text
+        self._render()
+
+    def set_color(self, color):
+        self.color = color
+        if self.cur_text is None:
+            return
+        if self.winfo_viewable():
+            self._render()
+        else:
+            self.stale = True       # redrawn when its page is shown
 
 
 class RingGauge(tk.Canvas):
-    """Apple-Fitness style ring with rounded caps."""
+    """Circular gauge in the accent colour, with a soft glow."""
 
-    def __init__(self, master, size, bg, scale=1.0, accent=TEXT, color=None):
+    GLOW_LAYERS = 0
+
+    def __init__(self, master, size, bg, scale=1.0, accent=TEXT):
         self.px = int(size * scale)
         super().__init__(master, width=self.px, height=self.px, bg=bg,
                          highlightthickness=0, bd=0)
         self.bg_color = bg
         self.sc = scale
         self.accent = accent
-        self.fixed = color          # None -> follows the accent colour
         self.value = -1.0
+        self.cur_num = None
         self.stale = False
-        self.num_px = int(40 * scale)
-        self.pct_px = int(16 * scale)
+        self.num_px = int(38 * scale)
+        self.pct_px = int(15 * scale)
         self.num_font = tkfont.Font(family=FONT, size=-self.num_px, weight=BOLD)
         self.pct_font = tkfont.Font(family=FONT, size=-self.pct_px, weight=BOLD)
         self.set_value(0)
 
-    @property
-    def color(self):
-        return self.fixed or self.accent
-
     def set_accent(self, color):
         self.accent = color
-        if self.fixed:
-            return
         if self.winfo_viewable():
             self.refresh()
         else:
             self.stale = True
 
     def refresh(self):
+        self.cur_num = None
         self.draw(max(self.value, 0))
 
     def set_value(self, v):
         v = clamp(v, 0, 100)
         if self.value >= 0 and abs(v - self.value) < 0.08 and not self.stale:
-            return
+            return  # nothing visible changed, skip the redraw
         self.value = v
         self.draw(v)
 
     def draw(self, v):
-        c, s, px = self, self.sc, self.px
-        lw = 17 * s
-        m = lw / 2 + 5 * s
+        c = self
+        s = self.sc
+        px = self.px
+        m = 20 * s
         box = (m, m, px - m, px - m)
         cx = cy = px / 2
         radius = (px - 2 * m) / 2
-        col = self.color
+        lw = 9 * s
+        accent = self.accent
 
-        c.delete("all")
-        c.create_oval(*box, outline=lerp_color(self.bg_color, col, 0.22),
-                      width=lw)
-        if v > 0.3:
-            extent = -359.9 * v / 100
+        # --- arc layer: redrawn every frame ---
+        c.delete("dyn")
+        c.create_oval(*box, outline=TRACK, width=lw, tags="dyn")
+
+        extent = -359.9 * v / 100
+        if v > 0.4:
+            # many thin layers, faint at the outside -> smooth falloff
+            n = self.GLOW_LAYERS
+            for i in range(n):
+                f = (i + 1) / n
+                extra = 2 + (n - 1 - i) * 2.0
+                c.create_arc(*box, start=90, extent=extent, style="arc",
+                             outline=lerp_color(self.bg_color, accent,
+                                                0.32 * f * f),
+                             width=lw + extra * s, tags="dyn")
             c.create_arc(*box, start=90, extent=extent, style="arc",
-                         outline=col, width=lw)
-            cap = lw / 2
-            c.create_oval(cx - cap, cy - radius - cap, cx + cap,
-                          cy - radius + cap, fill=col, width=0)
+                         outline=accent, width=lw, tags="dyn")
+
+            # bright head dot at the tip of the arc
             ang = math.radians(90 + extent)
             hx = cx + radius * math.cos(ang)
             hy = cy - radius * math.sin(ang)
-            c.create_oval(hx - cap, hy - cap, hx + cap, hy + cap,
-                          fill=col, width=0)
+            for k in range(5, 0, -1):
+                rr = lw / 2 + k * 1.6 * s
+                c.create_oval(hx - rr, hy - rr, hx + rr, hy + rr, width=0,
+                              fill=lerp_color(self.bg_color, accent,
+                                              0.30 * (1 - (k - 1) / 5) ** 2),
+                              tags="dyn")
+            rr = lw / 2 + 0.5 * s
+            c.create_oval(hx - rr, hy - rr, hx + rr, hy + rr, width=0,
+                          fill=accent, tags="dyn")
+        c.tag_lower("dyn")  # keep the number on top of the arcs
 
+        # --- number layer: only redrawn when the shown integer changes ---
         text = f"{v:.0f}"
-        nw = self.num_font.measure(text)
-        pw = self.pct_font.measure("%")
-        gap = 3 * s
-        x0 = cx - (nw + gap + pw) / 2
-        c.create_text(x0, cy, text=text, anchor="w", fill=TEXT,
-                      font=(FONT, -self.num_px, BOLD))
-        c.create_text(x0 + nw + gap, cy + self.num_px * 0.14, text="%",
-                      anchor="w", fill=MUTED, font=(FONT, -self.pct_px, BOLD))
+        if text != self.cur_num or self.stale:
+            self.cur_num = text
+            c.delete("num")
+            nw = self.num_font.measure(text)
+            pw = self.pct_font.measure("%")
+            gap = 3 * s
+            x0 = cx - (nw + gap + pw) / 2
+            glow_text(c, x0, cy, text, (FONT, -self.num_px, BOLD), accent,
+                      self.bg_color, strength=0.9, spread=5, step=1.2 * s,
+                      anchor="w", tags="num")
+            c.create_text(x0 + nw + gap, cy + 6 * s, text="%", anchor="w",
+                          fill=MUTED, font=(FONT, -self.pct_px, BOLD),
+                          tags="num")
         self.stale = False
 
 
 class SparkChart(tk.Canvas):
-    """Smooth scrolling area chart. `colors` entries of None follow the accent."""
+    """Scrolling line chart in the accent colour (1 or more series)."""
+
+    GLOW = ((15, 0.05), (11, 0.09), (8, 0.15), (5.5, 0.25))
 
     def __init__(self, master, bg, scale=1.0, height=110, accent=TEXT,
-                 colors=(None,), fixed_max=None, fmt=format_speed,
+                 mixes=(1.0,), fixed_max=None, fmt=format_speed,
                  floor=64 * 1024.0):
         super().__init__(master, height=int(height * scale), bg=bg,
                          highlightthickness=0, bd=0)
         self.bg_color = bg
         self.sc = scale
         self.accent = accent
-        self.colors = colors
-        self.series = [deque([0.0] * HISTORY, maxlen=HISTORY) for _ in colors]
+        self.mixes = mixes
+        self.series = [deque([0.0] * HISTORY, maxlen=HISTORY) for _ in mixes]
         self.fixed_max = fixed_max
         self.fmt = fmt
         self.floor = floor
         self.y_scale = float(fixed_max or floor)
         self.t0 = time.perf_counter()
         self.last_draw = 0.0
-        self.label_font = (FONT, -int(11 * scale))
+        self.label_font = (FONT, -int(10 * scale))
 
     def push(self, *values):
         for data, v in zip(self.series, values):
@@ -556,6 +598,7 @@ class SparkChart(tk.Canvas):
         if W < 40 or H < 30:
             return
 
+        # y axis: fixed (percent charts) or smooth auto-scaling (speed charts)
         if self.fixed_max:
             self.y_scale = float(self.fixed_max)
         else:
@@ -563,313 +606,101 @@ class SparkChart(tk.Canvas):
             self.y_scale += (peak - self.y_scale) * (1 - math.exp(-3.0 * dt))
 
         now = time.perf_counter()
-        if now - self.last_draw < 0.028:
+        if now - self.last_draw < 0.028:      # ~35 fps is plenty for lines
             return
         self.last_draw = now
 
         s = self.sc
         self.delete("all")
-        pad_t, pad_b = 20 * s, 6 * s
-        usable = H - pad_t - pad_b
+        pad = 8 * s
+        usable = H - 2 * pad
 
-        for k in (0, 1 / 3, 2 / 3, 1):
-            y = pad_t + usable * k
-            self.create_line(0, y, W, y, fill=GRID, dash=(2, 4))
-        self.create_text(2, 2, anchor="nw", fill=DIM, font=self.label_font,
+        # faint grid
+        for k in (0.25, 0.5, 0.75):
+            y = pad + usable * k
+            self.create_line(0, y, W, y, fill=GRID, dash=(2, 5))
+        self.create_text(W - 2, 2, anchor="ne", fill=DIM, font=self.label_font,
                          text=self.fmt(self.y_scale))
 
+        # scroll smoothly between samples
         frac = clamp((now - self.t0) / (UPDATE_MS / 1000))
         dx = W / (HISTORY - 2)
-        floor_y = H - pad_b
 
-        for idx in reversed(range(len(self.series))):
-            data = self.series[idx]
-            color = self.colors[idx] or self.accent
-            pts = []
+        # first series is drawn last so it sits on top
+        for data, mix in reversed(list(zip(self.series, self.mixes))):
+            color = lerp_color(self.bg_color, self.accent, mix)
+            coords = []
             for i, v in enumerate(data):
                 x = W + dx * (1 - frac) - (HISTORY - 1 - i) * dx
-                y = floor_y - clamp(v / self.y_scale) * usable
-                pts.append((x, y))
-            sm = [(x, min(max(y, pad_t), floor_y))
-                  for x, y in smooth_points(pts, 4)]
-            flat = [v for p in sm for v in p]
-            self.create_polygon(*flat, sm[-1][0], floor_y, sm[0][0], floor_y,
-                                fill=lerp_color(self.bg_color, color, 0.14),
-                                outline="")
-            self.create_line(*flat, width=2.5 * s, fill=color,
-                             capstyle="round", joinstyle="round")
+                y = H - pad - clamp(v / self.y_scale) * usable
+                coords.extend((x, y))
+            for width, glow_mix in self.GLOW:
+                self.create_line(*coords, smooth=True, splinesteps=8,
+                                 width=width * s,
+                                 fill=lerp_color(self.bg_color, color, glow_mix),
+                                 capstyle="round", joinstyle="round")
+            self.create_line(*coords, smooth=True, splinesteps=8, width=2 * s,
+                             fill=color, capstyle="round", joinstyle="round")
 
 
-class ToggleSwitch(tk.Canvas):
-    """iOS switch with an animated knob."""
+class GradientSlider(tk.Canvas):
+    """Slider whose track is a colour gradient (0..1)."""
 
-    def __init__(self, master, bg, scale, value, command, on_color=IOS_GREEN):
-        self.sc = scale
-        self.w, self.h = int(51 * scale), int(31 * scale)
-        super().__init__(master, width=self.w, height=self.h, bg=bg,
+    def __init__(self, master, bg, scale, grad_fn, knob_fn, command, height=28):
+        super().__init__(master, height=int(height * scale), bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
+        self.sc = scale
+        self.grad_fn = grad_fn
+        self.knob_fn = knob_fn
         self.command = command
-        self.on_color = on_color
-        self.value = bool(value)
-        self.pos = 1.0 if self.value else 0.0
-        self.anim = 0
-        self.bind("<Button-1>", self.toggle)
-        self.draw()
+        self.value = 0.0
+        self.pad = int(13 * scale)
+        self.bind("<Configure>", lambda e: self.draw())
+        self.bind("<Button-1>", self.on_drag)
+        self.bind("<B1-Motion>", self.on_drag)
 
-    def toggle(self, _event=None):
-        self.value = not self.value
-        self.anim += 1
-        self._step(time.perf_counter(), self.pos,
-                   1.0 if self.value else 0.0, self.anim)
+    def on_drag(self, event):
+        span = max(1, self.winfo_width() - 2 * self.pad)
+        self.value = clamp((event.x - self.pad) / span)
+        self.draw()
         self.command(self.value)
 
-    def _step(self, start, frm, to, token):
-        if token != self.anim:
-            return
-        t = clamp((time.perf_counter() - start) / 0.22)
-        self.pos = lerp(frm, to, ease_out_cubic(t))
+    def set_value(self, t):
+        self.value = clamp(t)
         self.draw()
-        if t < 1:
-            self.after(8, lambda: self._step(start, frm, to, token))
 
     def draw(self):
+        W, H = self.winfo_width(), self.winfo_height()
+        if W < 40:
+            return
+        s = self.sc
         self.delete("all")
-        w, h = self.w, self.h
-        self.create_polygon(rounded_rect_points(w / 2, h / 2, w, h, h / 2),
-                            fill=lerp_color("#39393D", self.on_color, self.pos),
-                            outline="")
-        r = h / 2 - 2 * self.sc
-        x = lerp(h / 2, w - h / 2, self.pos)
-        self.create_oval(x - r, h / 2 - r + 1, x + r, h / 2 + r + 1,
-                         fill="#0B0B0B", width=0)
-        self.create_oval(x - r, h / 2 - r, x + r, h / 2 + r,
-                         fill="#FFFFFF", width=0)
-
-
-class SegmentedControl(tk.Canvas):
-    """iOS segmented control with a sliding thumb."""
-
-    def __init__(self, master, bg, scale, options, index, command, seg_w=60):
-        self.sc = scale
-        self.options = options
-        self.seg_w = int(seg_w * scale)
-        self.w = self.seg_w * len(options) + 4
-        self.h = int(32 * scale)
-        super().__init__(master, width=self.w, height=self.h, bg=bg,
-                         highlightthickness=0, bd=0, cursor="hand2")
-        self.index = index
-        self.pos = float(index)
-        self.command = command
-        self.anim = 0
-        self.bind("<Button-1>", self.on_click)
-        self.draw()
-
-    def on_click(self, event):
-        i = int(clamp((event.x - 2) // self.seg_w, 0, len(self.options) - 1))
-        if i == self.index:
-            return
-        self.index = i
-        self.anim += 1
-        self._step(time.perf_counter(), self.pos, float(i), self.anim)
-        self.command(i)
-
-    def _step(self, start, frm, to, token):
-        if token != self.anim:
-            return
-        t = clamp((time.perf_counter() - start) / 0.25)
-        self.pos = lerp(frm, to, ease_out_back(t, 0.9))
-        self.draw()
-        if t < 1:
-            self.after(8, lambda: self._step(start, frm, to, token))
-
-    def draw(self):
-        self.delete("all")
-        w, h, s = self.w, self.h, self.sc
-        self.create_polygon(rounded_rect_points(w / 2, h / 2, w, h, 9 * s),
-                            fill=CARD_HI, outline="")
-        tx = 2 + self.pos * self.seg_w + self.seg_w / 2
-        self.create_polygon(
-            rounded_rect_points(tx, h / 2, self.seg_w - 1, h - 4, 7 * s),
-            fill="#636366", outline="")
-        for i, label in enumerate(self.options):
-            self.create_text(2 + i * self.seg_w + self.seg_w / 2, h / 2,
-                             text=label, fill=TEXT,
-                             font=(FONT, -int(13 * s),
-                                   BOLD if i == self.index else "normal"))
-
-
-class TrafficLights(tk.Canvas):
-    """Close / minimise / zoom dots with glyphs on hover."""
-
-    COLORS = ("#FF5F57", "#FEBC2E", "#28C840")
-
-    def __init__(self, master, bg, commands, scale=1.0):
-        self.d = 12 * scale
-        self.gap = 8 * scale
-        self.hh = int(TITLEBAR_H * scale) - 2
-        super().__init__(master, width=int(3 * self.d + 2 * self.gap + 2),
-                         height=self.hh, bg=bg, highlightthickness=0, bd=0,
-                         cursor="hand2")
-        self.commands = commands
-        self.hover = False
-        self.bind("<Enter>", lambda e: self._set_hover(True))
-        self.bind("<Leave>", lambda e: self._set_hover(False))
-        self.bind("<Button-1>", self.on_click)
-        self.draw()
-
-    def _set_hover(self, state):
-        self.hover = state
-        self.draw()
-
-    def on_click(self, event):
-        step = self.d + self.gap
-        i = int((event.x - 1) // step)
-        if 0 <= i < 3 and (event.x - 1) - i * step <= self.d:
-            self.commands[i]()
-
-    def draw(self):
-        self.delete("all")
-        r, cy = self.d / 2, self.hh / 2
-        k = r * 0.42
-        for i, col in enumerate(self.COLORS):
-            cx = 1 + r + i * (self.d + self.gap)
-            self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=col, width=0)
-            if not self.hover:
-                continue
-            g = "#3B1A18"
-            if i == 0:
-                self.create_line(cx - k, cy - k, cx + k, cy + k, fill=g, width=1.5)
-                self.create_line(cx - k, cy + k, cx + k, cy - k, fill=g, width=1.5)
-            elif i == 1:
-                self.create_line(cx - k * 1.1, cy, cx + k * 1.1, cy, fill=g, width=1.5)
-            else:
-                self.create_line(cx - k, cy, cx + k, cy, fill=g, width=1.5)
-                self.create_line(cx, cy - k, cx, cy + k, fill=g, width=1.5)
-
-
-NAV_ITEMS = (
-    ("Overview", "overview", IOS_BLUE),
-    ("Processor", "processor", IOS_PINK),
-    ("Memory", "memory", IOS_GREEN),
-    ("Graphics", "graphics", IOS_PURPLE),
-    ("Network", "network", IOS_ORANGE),
-    ("Settings", "settings", IOS_GRAY),
-)
-
-
-class NavSidebar(tk.Canvas):
-    """iPadOS-style sidebar with a selection pill that glides between items."""
-
-    ITEM_H, GAP, TOP, PAD = 46, 4, 120, 14
-
-    def __init__(self, master, scale, accent, command):
-        self.sc = scale
-        super().__init__(master, width=int(SIDEBAR_W * scale), bg=BG,
-                         highlightthickness=0, bd=0)
-        self.accent = accent
-        self.command = command
-        self.index = 0
-        self.hover = -1
-        self.pill_y = self._y(0)
-        self.anim = 0
-        self.bind("<Configure>", lambda e: self.render())
-        self.bind("<Motion>", self.on_motion)
-        self.bind("<Leave>", self.on_leave)
-        self.bind("<Button-1>", self.on_click)
-
-    def _y(self, i):
-        return (self.TOP + i * (self.ITEM_H + self.GAP)) * self.sc
-
-    def _hit(self, y):
-        step = (self.ITEM_H + self.GAP) * self.sc
-        rel = y - self.TOP * self.sc
-        i = int(rel // step)
-        if rel < 0 or not 0 <= i < len(NAV_ITEMS):
-            return -1
-        return i if rel - i * step <= self.ITEM_H * self.sc else -1
-
-    def on_motion(self, event):
-        i = self._hit(event.y)
-        self.configure(cursor="hand2" if i >= 0 else "")
-        if i != self.hover:
-            self.hover = i
-            self.render()
-
-    def on_leave(self, _event):
-        if self.hover != -1:
-            self.hover = -1
-            self.render()
-
-    def on_click(self, event):
-        i = self._hit(event.y)
-        if i >= 0:
-            self.command(NAV_ITEMS[i][0])
-
-    def set_accent(self, color):
-        self.accent = color
-        self.render()
-
-    def select(self, name, animate=True):
-        self.index = [n for n, _, _ in NAV_ITEMS].index(name)
-        target = self._y(self.index)
-        self.anim += 1
-        if not animate or abs(target - self.pill_y) < 1:
-            self.pill_y = target
-            self.render()
-            return
-        self._glide(time.perf_counter(), self.pill_y, target, self.anim)
-
-    def _glide(self, start, frm, to, token):
-        if token != self.anim:
-            return
-        t = clamp((time.perf_counter() - start) / 0.34)
-        self.pill_y = lerp(frm, to, ease_out_back(t, 0.9))
-        self.render()
-        if t < 1:
-            self.after(8, lambda: self._glide(start, frm, to, token))
-
-    def render(self):
-        c, s = self, self.sc
-        c.delete("all")
-        W = max(self.winfo_width(), int(SIDEBAR_W * s))
-        H = self.winfo_height()
-        pad = self.PAD * s
-
-        # header
-        draw_app_icon(c, 46 * s, 54 * s, 40 * s, self.accent,
-                      fg=contrast_text(self.accent))
-        c.create_text(76 * s, 46 * s, text="Volt", anchor="w", fill=TEXT,
-                      font=(FONT, -int(22 * s), BOLD))
-        c.create_text(76 * s, 66 * s, text="System Monitor", anchor="w",
-                      fill=MUTED, font=(FONT, -int(12 * s)))
-
-        ih = self.ITEM_H * s
-        if 0 <= self.hover != self.index:
-            c.create_polygon(
-                rounded_rect_points(W / 2, self._y(self.hover) + ih / 2,
-                                    W - 2 * pad, ih, 12 * s),
-                fill="#121214", outline="")
-        c.create_polygon(
-            rounded_rect_points(W / 2, self.pill_y + ih / 2, W - 2 * pad, ih,
-                                12 * s),
-            fill=lerp_color(BG, self.accent, 0.30), outline="")
-
-        for i, (name, kind, color) in enumerate(NAV_ITEMS):
-            cy = self._y(i) + ih / 2
-            active = i == self.index
-            draw_nav_icon(c, kind, pad + 29 * s, cy, 30 * s, color)
-            c.create_text(pad + 58 * s, cy, text=name, anchor="w",
-                          fill=TEXT if active else "#AEAEB2",
-                          font=(FONT, -int(15 * s),
-                                BOLD if active else "normal"))
-
-        c.create_text(26 * s, H - 24 * s, text="Volt 1.0.0", anchor="w",
-                      fill=DIM, font=(FONT, -int(11 * s)))
+        pad = self.pad
+        bar_h = 10 * s
+        y0 = (H - bar_h) / 2
+        y1 = y0 + bar_h
+        n = 56
+        span = W - 2 * pad
+        sw = span / n
+        for i in range(n):
+            x0 = pad + i * sw
+            self.create_rectangle(x0, y0, x0 + sw + 1, y1,
+                                  fill=self.grad_fn(i / (n - 1)), width=0)
+        kx = pad + self.value * span
+        r = 9 * s
+        self.create_oval(kx - r - 2 * s, H / 2 - r - 2 * s,
+                         kx + r + 2 * s, H / 2 + r + 2 * s,
+                         fill="#000000", width=0)
+        self.create_oval(kx - r, H / 2 - r, kx + r, H / 2 + r,
+                         fill=self.knob_fn(), outline="#FFFFFF", width=2 * s)
 
 
 # ---------- pages ----------
 
 class Page(ctk.CTkFrame):
+    """Base class: each page builds its own widgets and gets ticked/polled
+    only while it is visible."""
+
     def __init__(self, app, parent):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -890,43 +721,51 @@ class OverviewPage(Page):
         super().__init__(app, parent)
         app.page_title(self, "System Overview")
 
+        # gauge cards
         cards = ctk.CTkFrame(self, fg_color="transparent")
         cards.pack(fill="x")
         cards.grid_columnconfigure((0, 1, 2), weight=1, uniform="stat")
 
         self.gauges = []
-        for col, (title, caption, color) in enumerate((
-                ("CPU", "Processor load", IOS_PINK),
-                ("MEMORY", "RAM in use", IOS_GREEN),
-                ("DISK", "Space used", None))):
-            card, gauge = app.gauge_card(cards, title, caption, color)
+        for col, (title, caption) in enumerate((
+                ("CPU", "Processor load"),
+                ("MEMORY", "RAM in use"),
+                ("DISK", "Space used"))):
+            card, gauge = app.gauge_card(cards, title, caption)
             card.grid(row=0, column=col, sticky="nsew",
-                      padx=(0 if col == 0 else 7, 0 if col == 2 else 7))
+                      padx=(0 if col == 0 else 8, 0 if col == 2 else 8))
             self.gauges.append(gauge)
 
+        # lower row
         middle = ctk.CTkFrame(self, fg_color="transparent")
-        middle.pack(fill="both", expand=True, pady=(14, 0))
+        middle.pack(fill="both", expand=True, pady=(16, 0))
         middle.grid_columnconfigure(0, weight=3, uniform="low")
         middle.grid_columnconfigure(1, weight=2, uniform="low")
         middle.grid_rowconfigure(0, weight=1)
 
+        # network card
         network = app.make_card(middle)
-        network.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
-        app.card_title(network, "NETWORK")
+        network.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
+        ctk.CTkLabel(
+            network, text="NETWORK", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
 
         stats = ctk.CTkFrame(network, fg_color="transparent")
         stats.pack(fill="x", padx=22, pady=(10, 0))
         stats.grid_columnconfigure((0, 1), weight=1, uniform="net")
-        self.down_label = app.net_stat(stats, "DOWNLOAD", None, 0)
-        self.up_label = app.net_stat(stats, "UPLOAD", IOS_ORANGE, 1)
 
-        self.chart = app.make_chart(network, height=100,
-                                    colors=(None, IOS_ORANGE))
+        self.down_label = app.net_stat(stats, "DOWNLOAD", 1.0, 0)
+        self.up_label = app.net_stat(stats, "UPLOAD", 0.55, 1)
+
+        self.chart = app.make_chart(network, height=100, mixes=(1.0, 0.55))
         self.chart.pack(fill="both", expand=True, padx=22, pady=(12, 18))
         app.net_charts.append(self.chart)
 
+        # system info card
         system, _ = app.info_card(middle, "SYSTEM", system_info())
-        system.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        system.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     def tick(self, dt):
         d = self.app.disp
@@ -949,30 +788,39 @@ class ProcessorPage(Page):
         row1.grid_columnconfigure(0, weight=1, uniform="p")
         row1.grid_columnconfigure(1, weight=2, uniform="p")
 
-        card, self.gauge = app.gauge_card(row1, "CPU", "Total load", IOS_PINK)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        card, self.gauge = app.gauge_card(row1, "CPU", "Total load")
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         hist = app.make_card(row1)
-        hist.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        app.card_title(hist, "LOAD HISTORY", IOS_PINK)
+        hist.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(
+            hist, text="LOAD HISTORY", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
         self.chart = app.make_chart(hist, height=120, fixed_max=100,
-                                    colors=(IOS_PINK,),
                                     fmt=lambda v: f"{v:.0f}%")
         self.chart.pack(fill="both", expand=True, padx=22, pady=(10, 18))
         app.hist_charts["cpu"] = self.chart
 
+        # processor details
         details = app.make_card(self)
-        details.pack(fill="both", expand=True, pady=(14, 0))
-        app.card_title(details, "PROCESSOR", MUTED)
+        details.pack(fill="both", expand=True, pady=(16, 0))
+
+        ctk.CTkLabel(
+            details, text="PROCESSOR", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
 
         self.model = ctk.CTkLabel(
-            details, text="Detecting processor...", text_color=TEXT,
-            font=(FONT, 20, BOLD))
-        self.model.pack(anchor="w", padx=22, pady=(4, 8))
+            details, text="Detecting processor...", text_color=app.accent,
+            font=(FONT, 18, BOLD))
+        self.model.pack(anchor="w", padx=22, pady=(4, 6))
+        app.accent_widgets.append(self.model)
 
         cols = ctk.CTkFrame(details, fg_color="transparent")
         cols.pack(fill="x", padx=22, pady=(0, 14))
         cols.grid_columnconfigure((0, 1), weight=1, uniform="pc")
+
         left = ctk.CTkFrame(cols, fg_color="transparent")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
         right = ctk.CTkFrame(cols, fg_color="transparent")
@@ -980,17 +828,21 @@ class ProcessorPage(Page):
 
         self.vals = {}
         self.vals.update(app.info_rows(left, [
-            ("Manufacturer", "-"), ("Socket", "-"),
+            ("Manufacturer", "-"),
+            ("Socket", "-"),
             ("Cores / threads", "-"),
             ("Architecture", platform.machine() or "-"),
         ], row_pad=7, pad_x=0))
         self.vals.update(app.info_rows(right, [
-            ("Current speed", "-"), ("Rated speed", "-"),
-            ("Cache (L2 / L3)", "-"), ("Processes", "-"),
+            ("Current speed", "-"),
+            ("Rated speed", "-"),
+            ("Cache (L2 / L3)", "-"),
+            ("Processes", "-"),
         ], row_pad=7, pad_x=0))
 
     def poll(self):
-        data = self.app.cpu_info.data
+        app = self.app
+        data = app.cpu_info.data
         self.model.configure(text=data.get("name") or "Detecting processor...")
 
         cores = psutil.cpu_count(logical=False) or psutil.cpu_count()
@@ -1029,30 +881,32 @@ class MemoryPage(Page):
         row1.grid_columnconfigure(0, weight=1, uniform="m")
         row1.grid_columnconfigure(1, weight=2, uniform="m")
 
-        card, self.gauge = app.gauge_card(row1, "MEMORY", "RAM in use", IOS_GREEN)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        card, self.gauge = app.gauge_card(row1, "MEMORY", "RAM in use")
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         hist = app.make_card(row1)
-        hist.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        app.card_title(hist, "USAGE HISTORY", IOS_GREEN)
+        hist.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(
+            hist, text="USAGE HISTORY", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
         self.chart = app.make_chart(hist, height=120, fixed_max=100,
-                                    colors=(IOS_GREEN,),
                                     fmt=lambda v: f"{v:.0f}%")
         self.chart.pack(fill="both", expand=True, padx=22, pady=(10, 18))
         app.hist_charts["mem"] = self.chart
 
         row2 = ctk.CTkFrame(self, fg_color="transparent")
-        row2.pack(fill="both", expand=True, pady=(14, 0))
+        row2.pack(fill="both", expand=True, pady=(16, 0))
         row2.grid_columnconfigure((0, 1), weight=1, uniform="m2")
         row2.grid_rowconfigure(0, weight=1)
 
         ram, self.ram_vals = app.info_card(row2, "PHYSICAL MEMORY", [
             ("Total", "-"), ("Used", "-"), ("Available", "-")])
-        ram.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        ram.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         swap, self.swap_vals = app.info_card(row2, "SWAP / PAGE FILE", [
             ("Total", "-"), ("Used", "-"), ("Usage", "-")])
-        swap.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        swap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     def poll(self):
         vm = psutil.virtual_memory()
@@ -1081,14 +935,16 @@ class GraphicsPage(Page):
         row1.grid_columnconfigure(0, weight=1, uniform="g")
         row1.grid_columnconfigure(1, weight=2, uniform="g")
 
-        card, self.gauge = app.gauge_card(row1, "GPU", "Graphics load", IOS_PURPLE)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        card, self.gauge = app.gauge_card(row1, "GPU", "Graphics load")
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         hist = app.make_card(row1)
-        hist.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        app.card_title(hist, "LOAD HISTORY", IOS_PURPLE)
+        hist.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(
+            hist, text="LOAD HISTORY", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
         self.chart = app.make_chart(hist, height=120, fixed_max=100,
-                                    colors=(IOS_PURPLE,),
                                     fmt=lambda v: f"{v:.0f}%")
         self.chart.pack(fill="both", expand=True, padx=22, pady=(10, 18))
         app.hist_charts["gpu"] = self.chart
@@ -1096,12 +952,12 @@ class GraphicsPage(Page):
         details, self.vals = app.info_card(self, "DETAILS", [
             ("Graphics card", "Detecting..."), ("Video memory", "-"),
             ("Temperature", "-"), ("Telemetry", "-")])
-        details.pack(fill="x", pady=(14, 0))
+        details.pack(fill="x", pady=(16, 0))
 
         self.notice = ctk.CTkLabel(
-            self, text="", text_color=DIM, font=(FONT, 12),
+            self, text="", text_color=DIM, font=(FONT, 11),
             wraplength=int(700 * s), justify="left")
-        self.notice.pack(anchor="w", pady=(10, 0), padx=4)
+        self.notice.pack(anchor="w", pady=(10, 0))
 
     def poll(self):
         g = self.app.gpu
@@ -1140,52 +996,61 @@ class NetworkPage(Page):
 
         self.big = {}
         self.sub = {}
-        for col, (key, title, color) in enumerate((
-                ("down", "DOWNLOAD", None), ("up", "UPLOAD", IOS_ORANGE))):
+        for col, (key, title, mix) in enumerate((
+                ("down", "DOWNLOAD", 1.0), ("up", "UPLOAD", 0.55))):
             card = app.make_card(top)
             card.grid(row=0, column=col, sticky="nsew",
-                      padx=(0 if col == 0 else 7, 0 if col == 1 else 7))
+                      padx=(0 if col == 0 else 8, 0 if col == 1 else 8))
 
             legend = ctk.CTkFrame(card, fg_color="transparent")
             legend.pack(anchor="w", padx=22, pady=(18, 0))
-            app.legend_dot(legend, color).pack(side="left", padx=(0, 7))
+            app.legend_dot(legend, mix).pack(side="left", padx=(0, 7))
             ctk.CTkLabel(legend, text=title, text_color=MUTED,
-                         font=(FONT, 13, BOLD)).pack(side="left")
+                         font=(FONT, 11, BOLD)).pack(side="left")
 
-            label = ValueLabel(card, "0 B/s", 34)
-            label.pack(anchor="w", padx=22, pady=(4, 0))
+            label = app.glow_label(card, "0 B/s", 34, CARD, width=300,
+                                   spread=5, step=1.2)
+            label.pack(anchor="w", padx=14, pady=(4, 0))
             self.big[key] = label
 
-            sub = ctk.CTkLabel(card, text="", text_color=MUTED, font=(FONT, 12))
-            sub.pack(anchor="w", padx=22, pady=(2, 18))
+            sub = ctk.CTkLabel(card, text="", text_color=DIM,
+                               font=(FONT, 11))
+            sub.pack(anchor="w", padx=22, pady=(0, 18))
             self.sub[key] = sub
 
         low = ctk.CTkFrame(self, fg_color="transparent")
-        low.pack(fill="both", expand=True, pady=(14, 0))
+        low.pack(fill="both", expand=True, pady=(16, 0))
         low.grid_columnconfigure(0, weight=3, uniform="nl")
         low.grid_columnconfigure(1, weight=2, uniform="nl")
         low.grid_rowconfigure(0, weight=1)
 
         chart_card = app.make_card(low)
-        chart_card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
-        app.card_title(chart_card, "TRAFFIC", MUTED)
-        self.chart = app.make_chart(chart_card, height=120,
-                                    colors=(None, IOS_ORANGE))
+        chart_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ctk.CTkLabel(
+            chart_card, text="TRAFFIC", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
+        self.chart = app.make_chart(chart_card, height=120, mixes=(1.0, 0.55))
         self.chart.pack(fill="both", expand=True, padx=22, pady=(10, 18))
         app.net_charts.append(self.chart)
 
         iface_card = app.make_card(low)
-        iface_card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        app.card_title(iface_card, "ACTIVE ADAPTERS", MUTED)
+        iface_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(
+            iface_card, text="ACTIVE ADAPTERS", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 6))
 
         self.iface_rows = []
         for _ in range(5):
             row = ctk.CTkFrame(iface_card, fg_color="transparent")
             row.pack(fill="x", padx=22, pady=7)
-            name = ctk.CTkLabel(row, text="", text_color=TEXT, font=(FONT, 14))
+            name = ctk.CTkLabel(row, text="", text_color=MUTED, font=(FONT, 12))
             name.pack(side="left")
-            ip = ctk.CTkLabel(row, text="", text_color=MUTED, font=(FONT, 14))
+            ip = ctk.CTkLabel(row, text="", text_color=app.accent,
+                              font=(FONT, 12, BOLD))
             ip.pack(side="right")
+            app.accent_widgets.append(ip)
             self.iface_rows.append((name, ip))
 
         self.poll_count = 0
@@ -1198,6 +1063,7 @@ class NetworkPage(Page):
         self.sub["up"].configure(
             text=f"Total sent  {format_bytes(net.get_bytes_sent())}"
                  f"     Peak  {format_speed(app.peak['up'])}")
+
         if self.poll_count % 5 == 0:
             self.refresh_interfaces()
         self.poll_count += 1
@@ -1233,135 +1099,183 @@ class NetworkPage(Page):
 
 class SettingsPage(Page):
 
-    PRESETS = [IOS_BLUE, IOS_TEAL, IOS_GREEN, IOS_YELLOW,
-               IOS_ORANGE, IOS_PINK, IOS_PURPLE, "#FFFFFF"]
+    PRESETS = ["#FFFFFF", "#5CE1FF", "#FF4FD8", "#7CFF6B",
+               "#FFC247", "#A78BFA", "#FF5C5C"]
 
     def __init__(self, app, parent):
         super().__init__(app, parent)
         s = app.ui_scale
         app.page_title(self, "Settings")
-        self.color = app.accent.upper()
 
-        # ----- accent colour -----
+        h, sat, val = hex_to_hsv(app.accent)
+        self.h, self.s, self.v = h, sat, max(val, MIN_BRIGHTNESS)
+
         card = app.make_card(self)
         card.pack(fill="x")
-        app.card_title(card, "ACCENT COLOR")
+
+        ctk.CTkLabel(
+            card, text="ACCENT COLOR", text_color=MUTED,
+            font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
         ctk.CTkLabel(
             card,
-            text="Tints charts, rings and the sidebar. Changes preview "
-                 "live; tap Save to keep them.",
-            text_color=MUTED, font=(FONT, 12)
+            text="Recolors the glowing text, rings and charts. "
+                 "Changes preview live; press Save to keep them.",
+            text_color=DIM, font=(FONT, 11)
         ).pack(anchor="w", padx=22, pady=(2, 0))
 
-        swatches = ctk.CTkFrame(card, fg_color="transparent")
-        swatches.pack(fill="x", padx=22, pady=(14, 0))
-        self.swatches = []
-        for color in self.PRESETS:
-            btn = ctk.CTkButton(
-                swatches, text="", width=36, height=36, corner_radius=18,
-                fg_color=color, hover_color=color, border_width=0,
-                font=(FONT, 16, BOLD),
-                command=lambda c=color: self.set_color(c))
-            btn.pack(side="left", padx=(0, 12))
-            self.swatches.append((btn, color))
+        # live preview
+        prev = ctk.CTkFrame(card, fg_color="transparent")
+        prev.pack(fill="x", padx=14, pady=(8, 0))
+        self.preview = app.glow_label(prev, "Aa  128.4 MB/s", 32, CARD,
+                                      width=380, spread=5, step=1.3)
+        self.preview.pack(side="left")
+        self.hex_label = ctk.CTkLabel(
+            prev, text=app.accent, text_color=MUTED, font=(FONT, 12, BOLD))
+        self.hex_label.pack(side="right", padx=8)
 
+        # presets
+        swatches = ctk.CTkFrame(card, fg_color="transparent")
+        swatches.pack(fill="x", padx=22, pady=(6, 0))
+        for color in self.PRESETS:
+            ctk.CTkButton(
+                swatches, text="", width=30, height=30, corner_radius=15,
+                fg_color=color, hover_color=color,
+                border_width=1, border_color="#2A2A2A",
+                command=lambda c=color: self.set_from_hex(c)
+            ).pack(side="left", padx=(0, 10))
+
+        # gradient sliders (each one lives in its own labelled row)
+        knob = lambda: self.current_hex()
+        specs = (
+            ("Hue",
+             lambda t: hsv_to_hex(t, 1, 1),
+             self.on_hue),
+            ("Saturation",
+             lambda t: hsv_to_hex(self.h, t, self.v),
+             self.on_sat),
+            ("Brightness",
+             lambda t: hsv_to_hex(
+                 self.h, self.s,
+                 MIN_BRIGHTNESS + (1 - MIN_BRIGHTNESS) * t),
+             self.on_bri),
+        )
+        made = []
+        for name, grad, command in specs:
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=22, pady=(8, 0))
+            ctk.CTkLabel(row, text=name, text_color=MUTED, width=90,
+                         anchor="w", font=(FONT, 12)).pack(side="left")
+            slider = GradientSlider(row, CARD, s, grad, knob, command)
+            slider.pack(side="left", fill="x", expand=True)
+            made.append(slider)
+        self.hue, self.sat, self.bri = made
+        self.sliders = tuple(made)
+
+        self.hue.set_value(self.h)
+        self.sat.set_value(self.s)
+        self.bri.set_value((self.v - MIN_BRIGHTNESS) / (1 - MIN_BRIGHTNESS))
+
+        # hex entry + buttons
         bottom = ctk.CTkFrame(card, fg_color="transparent")
         bottom.pack(fill="x", padx=22, pady=(16, 20))
+
         ctk.CTkLabel(bottom, text="HEX", text_color=MUTED,
-                     font=(FONT, 12, BOLD)).pack(side="left", padx=(0, 10))
+                     font=(FONT, 11, BOLD)).pack(side="left", padx=(0, 10))
         self.entry = ctk.CTkEntry(
-            bottom, width=110, height=38, corner_radius=10,
-            fg_color=CARD_HI, border_width=0, text_color=TEXT,
-            font=(FONT, 14))
+            bottom, width=110, height=36, corner_radius=8,
+            fg_color="#111111", border_color=BORDER, text_color=TEXT,
+            font=(FONT, 13))
         self.entry.pack(side="left")
-        self.entry.insert(0, self.color)
+        self.entry.insert(0, app.accent)
         self.entry.bind("<Return>", self.on_entry)
         self.entry.bind("<FocusOut>", self.on_entry)
 
-        self.save_btn = ctk.CTkButton(
-            bottom, text="Save", width=96, height=38, corner_radius=12,
-            fg_color=app.accent, hover_color=lerp_color(app.accent, "#000000", 0.2),
-            text_color=contrast_text(app.accent), font=(FONT, 14, BOLD),
-            command=self.save)
-        self.save_btn.pack(side="right")
-        app.accent_fills.append(self.save_btn)
         ctk.CTkButton(
-            bottom, text="Reset", width=84, height=38, corner_radius=12,
-            fg_color=CARD_HI, hover_color="#3A3A3C", text_color=TEXT,
-            font=(FONT, 14), command=self.reset
+            bottom, text="Save", width=96, height=36, corner_radius=8,
+            fg_color="#FFFFFF", hover_color="#D9D9D9", text_color="#000000",
+            font=(FONT, 13, BOLD), command=self.save
+        ).pack(side="right")
+        ctk.CTkButton(
+            bottom, text="Reset", width=84, height=36, corner_radius=8,
+            fg_color="transparent", hover_color="#161616",
+            border_width=1, border_color="#2A2A2A", text_color=MUTED,
+            font=(FONT, 13), command=self.reset
         ).pack(side="right", padx=(0, 10))
-        self.status = ctk.CTkLabel(bottom, text="Saved", text_color=MUTED,
-                                   font=(FONT, 12))
+        self.status = ctk.CTkLabel(
+            bottom, text="Saved", text_color=MUTED, font=(FONT, 12))
         self.status.pack(side="right", padx=16)
-
-        # ----- general -----
-        general = app.make_card(self)
-        general.pack(fill="x", pady=(14, 0))
-        app.card_title(general, "GENERAL", MUTED)
-
-        right = app.list_row(general, "Reduce Motion",
-                             "Turns off page, sidebar and launch animations")
-        ToggleSwitch(right, CARD, s, settings["reduce_motion"],
-                     app.set_reduce_motion).pack()
-
-        right = app.list_row(general, "Update Rate",
-                             "How often readings are taken", separator=False)
-        SegmentedControl(right, CARD, s, ["1 s", "2 s", "5 s"],
-                         INTERVALS.index(UPDATE_MS), self.on_rate,
-                         seg_w=56).pack()
-        ctk.CTkFrame(general, height=8, fg_color="transparent").pack()
-
-        self.refresh_swatches()
 
     # ----- colour state -----
 
-    def refresh_swatches(self):
-        for btn, color in self.swatches:
-            selected = color.upper() == self.color.upper()
-            btn.configure(text="✓" if selected else "",
-                          text_color=contrast_text(color))
+    def current_hex(self):
+        return hsv_to_hex(self.h, self.s, self.v)
 
-    def set_color(self, color):
-        self.color = color.upper()
-        self.app.set_accent(self.color)
+    def apply(self):
+        color = self.current_hex()
+        self.app.set_accent(color)
+        self.hex_label.configure(text=color)
         self.entry.delete(0, "end")
-        self.entry.insert(0, self.color)
-        self.save_btn.configure(text_color=contrast_text(self.color))
+        self.entry.insert(0, color)
+        for slider in self.sliders:
+            slider.draw()
         self.status.configure(
-            text="Saved" if self.color == self.app.saved_accent else "Unsaved changes")
-        self.refresh_swatches()
+            text="Saved" if color == self.app.saved_accent else "Unsaved changes")
+
+    def on_hue(self, t):
+        self.h = t
+        self.apply()
+
+    def on_sat(self, t):
+        self.s = t
+        self.apply()
+
+    def on_bri(self, t):
+        self.v = MIN_BRIGHTNESS + (1 - MIN_BRIGHTNESS) * t
+        self.apply()
+
+    def set_from_hex(self, hex_color):
+        h, s, v = hex_to_hsv(hex_color)
+        self.h, self.s, self.v = h, s, max(v, MIN_BRIGHTNESS)
+        self.hue.set_value(self.h)
+        self.sat.set_value(self.s)
+        self.bri.set_value((self.v - MIN_BRIGHTNESS) / (1 - MIN_BRIGHTNESS))
+        self.apply()
 
     def on_entry(self, event=None):
         text = self.entry.get().strip()
         if not text.startswith("#"):
             text = "#" + text
         if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
-            self.set_color(text)
+            self.set_from_hex(text)
         else:
             self.status.configure(text="Invalid hex")
-
-    def on_rate(self, index):
-        self.app.set_update_rate(INTERVALS[index])
 
     def save(self):
         ok = self.app.save_accent()
         self.status.configure(text="Saved" if ok else "Couldn't save file")
 
     def reset(self):
-        self.set_color(DEFAULT_ACCENT)
+        self.set_from_hex(DEFAULT_ACCENT)
 
 
 class RevoltApp(ctk.CTk):
 
+    PAGE_NAMES = ["Overview", "Processor", "Memory",
+                  "Graphics", "Network", "Settings"]
+
     def check_font(self):
-        """Pick SF Pro if installed, otherwise the nearest system font."""
+        """Fall back cleanly if the custom font file couldn't be loaded."""
         global FONT
-        available = {f.lower(): f for f in tkfont.families(self)}
-        for name in FONT_CANDIDATES:
-            if name.lower() in available:
-                FONT = available[name.lower()]
-                return
-        FONT = "Helvetica"
+        if not FONT_LOADED:
+            print(f"[Volt] Couldn't load the font file: {FONT_PATH}\n"
+                  f"       Put sharkgotyourhand.ttf in a 'fonts' folder next to "
+                  f"this script. Using Segoe UI for now.")
+            FONT = "Segoe UI"
+            return
+        families = {f.lower(): f for f in tkfont.families(self)}
+        if FONT not in families.values() and FONT.lower() in families:
+            FONT = families[FONT.lower()]   # fix capitalisation differences
 
     def __init__(self):
         super().__init__()
@@ -1369,15 +1283,18 @@ class RevoltApp(ctk.CTk):
 
         self.title("VOLT | System Monitor")
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
-        self.minsize(950, 620)
+        self.minsize(950, 600)
 
         try:
             self.ui_scale = self._get_window_scaling()
         except Exception:
             self.ui_scale = 1.0
 
-        self.configure(fg_color=BG)
+        # Borderless window; the colour key makes the empty areas see-through
+        # so only the animated shape is visible during the splash.
+        self.configure(fg_color=TRANSPARENT)
         self.overrideredirect(True)
+        self.attributes("-transparentcolor", TRANSPARENT)
         self.center_window(WINDOW_W, WINDOW_H)
 
         self.is_max = False
@@ -1386,17 +1303,19 @@ class RevoltApp(ctk.CTk):
         self._drag_x = 0
         self._drag_y = 0
 
+        # accent colour - loaded from disk
         self.accent = settings["accent"]
         self.saved_accent = settings["accent"]
-        self.reduce_motion = settings["reduce_motion"]
         self._accent_job = None
 
-        self.accent_widgets = []   # text recoloured with the accent
-        self.accent_dots = []      # (frame, color-or-None) legend dots
-        self.accent_fills = []     # buttons filled with the accent
+        # things that must be recoloured when the accent changes
+        self.glow_labels = []
+        self.accent_widgets = []
+        self.accent_dots = []     # (frame, mix) legend dots
         self.all_gauges = []
         self.all_charts = []
 
+        # live data: targets come from real readings, disp is what is shown
         keys = ("cpu", "mem", "disk", "gpu", "down", "up")
         self.target = {k: 0.0 for k in keys}
         self.disp = {k: 0.0 for k in keys}
@@ -1405,6 +1324,7 @@ class RevoltApp(ctk.CTk):
         self.hist_charts = {}
         self.pages = {}
         self.current = "Overview"
+        self.nav_items = {}
         self._slide_token = 0
 
         self.gpu = GpuMonitor()
@@ -1412,40 +1332,53 @@ class RevoltApp(ctk.CTk):
         self.cpu_info = CpuInfo()
         self.cpu_info.start()
 
+        # state for the speed calculation
         self.prev_sent = 0
         self.prev_recv = 0
         self.prev_time = time.time()
         self._last_frame = time.perf_counter()
 
+        # Everything lives inside one container so the root can stay
+        # transparent while the splash plays.
         self.container = ctk.CTkFrame(
-            self, fg_color=BG, corner_radius=0,
-            border_width=1, border_color=BORDER)
+            self,
+            fg_color=BG,
+            corner_radius=0,
+            border_width=1,
+            border_color=BORDER
+        )
         self.container.pack(fill="both", expand=True)
 
         self.create_titlebar()
-        self.body = ctk.CTkFrame(self.container, fg_color="transparent",
-                                 corner_radius=0)
+        ctk.CTkFrame(self.container, height=1, corner_radius=0,
+                     fg_color=BORDER).pack(fill="x", padx=1)
+
+        self.body = ctk.CTkFrame(
+            self.container,
+            fg_color="transparent",
+            corner_radius=0
+        )
         self.body.pack(fill="both", expand=True, padx=1, pady=(0, 1))
 
-        self.nav = NavSidebar(self.body, self.ui_scale, self.accent,
-                              lambda n: self.show_page(n))
-        self.nav.pack(side="left", fill="y")
+        self.create_sidebar()
         ctk.CTkFrame(self.body, width=1, corner_radius=0,
-                     fg_color=CARD).pack(side="left", fill="y")
+                     fg_color=BORDER).pack(side="left", fill="y")
         self.create_pages()
 
         self.bind("<Map>", self.on_map)
 
         self.start_splash()
+        # CTk touches the window ~200 ms after creation, so re-apply the
+        # borderless style / taskbar entry after that.
         self.after(300, self.init_window)
 
     # ---------------------------------------------------------------
-    # Accent colour & settings
+    # Accent colour
     # ---------------------------------------------------------------
 
     def set_accent(self, color):
-        """Calls are coalesced so dragging never queues more work than the UI
-        can draw."""
+        """Recolour everything that uses the accent. Calls are coalesced so
+        dragging a slider never queues more work than the UI can draw."""
         self.accent = color
         if self._accent_job is None:
             self._accent_job = self.after(25, self._apply_accent)
@@ -1453,35 +1386,22 @@ class RevoltApp(ctk.CTk):
     def _apply_accent(self):
         self._accent_job = None
         color = self.accent
+        for label in self.glow_labels:
+            label.set_color(color)
         for widget in self.accent_widgets:
             widget.configure(text_color=color)
         for gauge in self.all_gauges:
             gauge.set_accent(color)
         for chart in self.all_charts:
             chart.accent = color
-        for dot, fixed in self.accent_dots:
-            if fixed is None:
-                dot.configure(fg_color=color)
-        for btn in self.accent_fills:
-            btn.configure(fg_color=color,
-                          hover_color=lerp_color(color, "#000000", 0.2))
-        self.nav.set_accent(color)
+        for dot, mix in self.accent_dots:
+            dot.configure(fg_color=lerp_color(CARD, color, mix))
+        self.set_active(self.current)
 
     def save_accent(self):
         self.saved_accent = self.accent
         settings["accent"] = self.accent
         return save_settings(settings)
-
-    def set_reduce_motion(self, on):
-        self.reduce_motion = bool(on)
-        settings["reduce_motion"] = self.reduce_motion
-        save_settings(settings)
-
-    def set_update_rate(self, ms):
-        global UPDATE_MS
-        UPDATE_MS = ms
-        settings["interval"] = ms
-        save_settings(settings)
 
     # ---------------------------------------------------------------
     # Window helpers (borderless window management)
@@ -1497,8 +1417,7 @@ class RevoltApp(ctk.CTk):
         self.set_appwindow()
 
     def set_appwindow(self):
-        """Borderless windows get no taskbar icon by default - force one,
-        and ask Windows 11 for rounded window corners."""
+        """Borderless windows get no taskbar icon by default - force one."""
         try:
             GWL_EXSTYLE = -20
             WS_EX_APPWINDOW = 0x00040000
@@ -1507,18 +1426,13 @@ class RevoltApp(ctk.CTk):
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-            try:
-                pref = ctypes.c_int(2)  # DWMWCP_ROUND
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
-            except Exception:
-                pass
             self.withdraw()
             self.after(10, self.deiconify)
         except Exception:
-            pass
+            pass  # not on Windows
 
     def on_map(self, event):
+        # Coming back from the taskbar: go borderless again
         if event.widget is self and self.minimized:
             self.minimized = False
             self.after(10, self.restore_borderless)
@@ -1528,19 +1442,22 @@ class RevoltApp(ctk.CTk):
         self.set_appwindow()
 
     def minimize(self):
+        # iconify() doesn't work on borderless windows, so briefly give the
+        # window its frame back, minimize it, and undo that on restore.
         self.update_idletasks()
         self.minimized = True
         self.overrideredirect(False)
         self.iconify()
 
     def work_area(self):
+        """Screen area excluding the taskbar."""
         try:
             class RECT(ctypes.Structure):
                 _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                             ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
             rect = RECT()
             ctypes.windll.user32.SystemParametersInfoW(
-                0x0030, 0, ctypes.byref(rect), 0)
+                0x0030, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
             return rect.left, rect.top, rect.right, rect.bottom
         except Exception:
             return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
@@ -1549,13 +1466,16 @@ class RevoltApp(ctk.CTk):
         if self.is_max:
             tk.Tk.geometry(self, self.restore_geo)
             self.is_max = False
+            self.max_btn.configure(text="\uE922")  # maximize glyph
         else:
             self.restore_geo = (
                 f"{self.winfo_width()}x{self.winfo_height()}"
-                f"+{self.winfo_x()}+{self.winfo_y()}")
+                f"+{self.winfo_x()}+{self.winfo_y()}"
+            )
             l, t, r, b = self.work_area()
             tk.Tk.geometry(self, f"{r - l}x{b - t}+{l}+{t}")
             self.is_max = True
+            self.max_btn.configure(text="\uE923")  # restore glyph
 
     def close(self):
         try:
@@ -1571,15 +1491,6 @@ class RevoltApp(ctk.CTk):
         self.attributes("-alpha", alpha)
         self.after(12, lambda: self.fade_out(alpha - 0.1))
 
-    def fade_in(self, alpha=0.0):
-        alpha = min(1.0, alpha + 0.09)
-        try:
-            self.attributes("-alpha", alpha)
-            if alpha < 1.0:
-                self.after(12, lambda: self.fade_in(alpha))
-        except tk.TclError:
-            pass
-
     def start_move(self, event):
         self._drag_x = event.x_root - self.winfo_x()
         self._drag_y = event.y_root - self.winfo_y()
@@ -1587,98 +1498,157 @@ class RevoltApp(ctk.CTk):
     def do_move(self, event):
         if self.is_max:
             return
-        tk.Tk.geometry(self, f"+{event.x_root - self._drag_x}"
-                             f"+{event.y_root - self._drag_y}")
+        x = event.x_root - self._drag_x
+        y = event.y_root - self._drag_y
+        tk.Tk.geometry(self, f"+{x}+{y}")
 
     # ---------------------------------------------------------------
-    # Launch animation (iOS app-launch style)
+    # Startup animation
     # ---------------------------------------------------------------
 
     def start_splash(self):
-        self.splash = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0)
+        # Key-coloured canvas = invisible, and it hides the UI underneath
+        self.splash = tk.Canvas(self, bg=TRANSPARENT, highlightthickness=0, bd=0)
         self.splash.place(x=0, y=0, relwidth=1, relheight=1)
-        tk.Misc.lift(self.splash)
-        if self.reduce_motion:
-            self.after(50, self.finish_splash)
-        else:
-            self.after(450, self.splash_begin)
-
-    def splash_begin(self):
-        self.splash_start = time.perf_counter()
-        self.splash_tick()
+        tk.Misc.lift(self.splash)  # Canvas.lift() means "raise item", so call the widget version
+        self.splash_frame = 0
+        # small delay so the borderless/taskbar setup finishes first
+        self.after(450, self.splash_tick)
 
     def splash_tick(self):
-        try:
-            t = time.perf_counter() - self.splash_start
-            if t >= SPLASH_TOTAL:
-                self.finish_splash()
-                return
-            self.draw_splash(t)
-            self.after(FRAME_MS, self.splash_tick)
-        except tk.TclError:
-            pass
+        f = self.splash_frame
+        morph_start = GROW_FRAMES + HOLD_FRAMES
+        curtain_start = morph_start + MORPH_FRAMES
+        end = curtain_start + CURTAIN_FRAMES
 
-    def draw_splash(self, t):
+        if f < morph_start:
+            self.draw_orb(f)
+        elif f < curtain_start:
+            t = (f - morph_start + 1) / MORPH_FRAMES
+            self.draw_morph(ease_in_out_cubic(clamp(t)))
+        elif f < end:
+            t = (f - curtain_start + 1) / CURTAIN_FRAMES
+            # the finished box slides up and off the window
+            self.splash.place(x=0, rely=-ease_in_cubic(clamp(t)),
+                              relwidth=1, relheight=1)
+        else:
+            self.finish_splash()
+            return
+
+        self.splash_frame += 1
+        self.after(FRAME_MS, self.splash_tick)
+
+    def draw_orb(self, f):
         c = self.splash
         c.delete("all")
-        s = self.ui_scale
         W, H = c.winfo_width(), c.winfo_height()
-        cx, cy = W / 2, H / 2 - 30 * s
-        size = 116 * s
+        cx, cy = W / 2, H / 2
 
-        out = ease_in_cubic(clamp((t - SPLASH_OUT_AT) / SPLASH_OUT_S))
-        fade = ease_out_cubic(clamp(t / 0.4)) * (1 - out)
-        scale = (lerp(0.5, 1.0, ease_out_back(clamp(t / SPLASH_IN)))
-                 * lerp(1.0, 1.6, out))
+        grow = clamp(f / GROW_FRAMES)
+        e = ease_out_cubic(grow)
+        pulse = 1 + 0.045 * math.sin(f * 0.22) if grow >= 1 else 1
+        R = 62 * e * pulse
 
-        draw_app_icon(c, cx, cy, size * scale,
-                      lerp_color(BG, self.accent, fade),
-                      fg=lerp_color(BG, contrast_text(self.accent), fade))
+        # soft glow rings (blend towards the colour key = fades into the desktop)
+        for i in range(10, 0, -1):
+            rr = R + i * 5.5
+            col = lerp_color(TRANSPARENT, accent_color, 0.05 * (11 - i) ** 1.4 / 10 * e)
+            c.create_oval(cx - rr, cy - rr, cx + rr, cy + rr,
+                          outline=col, width=2)
 
-        text_a = clamp((t - 0.45) / 0.35) * (1 - out)
-        ty = cy + size * 0.5 + 46 * s
-        c.create_text(cx, ty, text="Volt", fill=lerp_color(BG, TEXT, text_a),
-                      font=(FONT, -int(30 * s), BOLD))
-        c.create_text(cx, ty + 30 * s, text="System Monitor",
-                      fill=lerp_color(BG, MUTED, text_a),
-                      font=(FONT, -int(14 * s)))
+        # body of the orb
+        c.create_oval(cx - R, cy - R, cx + R, cy + R,
+                      fill=PANEL, outline=accent_color, width=3)
 
-        # iOS-style activity indicator
-        spin_a = clamp((t - 0.8) / 0.3) * (1 - out)
-        if spin_a > 0:
-            sy = ty + 84 * s
-            for i in range(12):
-                a = i * math.pi / 6
-                lead = (t * 1.3 - i / 12) % 1.0
-                level = (0.18 + 0.82 * (1 - lead)) * spin_a
-                r1, r2 = 8 * s, 15 * s
-                c.create_line(cx + math.sin(a) * r1, sy - math.cos(a) * r1,
-                              cx + math.sin(a) * r2, sy - math.cos(a) * r2,
-                              fill=lerp_color(BG, MUTED, level),
-                              width=2.5 * s, capstyle="round")
+        # orbiting arcs
+        ar = R + 20
+        for offset in (0, 180):
+            c.create_arc(cx - ar, cy - ar, cx + ar, cy + ar,
+                         start=-f * 7 + offset, extent=80,
+                         style="arc", outline=accent_color, width=3)
+
+        # logo text (uses the saved accent colour)
+        pulse_glow = 0.75 + 0.25 * math.sin(f * 0.22)
+        glow_text(c, cx, cy, "VOLT", (FONT, 18, BOLD),
+                  lerp_color(PANEL, self.accent, e), PANEL,
+                  strength=e * pulse_glow, spread=5, step=1.5)
+
+    def draw_morph(self, e):
+        c = self.splash
+        c.delete("all")
+        W, H = c.winfo_width(), c.winfo_height()
+        cx, cy = W / 2, H / 2
+
+        R = 62
+        w = lerp(2 * R, W + 2, e)
+        h = lerp(2 * R, H + 2, e)
+        r = lerp(R, 0, e)
+
+        fill = lerp_color(PANEL, BG, e)
+        outline = lerp_color(accent_color, BG, e)
+
+        # glow halo that fades as the shape expands
+        for i in range(8, 0, -1):
+            pad = i * 5.5 * (1 - e)
+            col = lerp_color(TRANSPARENT, accent_color,
+                             0.05 * (9 - i) ** 1.4 / 8 * (1 - e))
+            c.create_polygon(
+                rounded_rect_points(cx, cy, w + pad * 2, h + pad * 2, r + pad),
+                fill="", outline=col, width=2
+            )
+
+        c.create_polygon(
+            rounded_rect_points(cx, cy, w, h, r),
+            fill=fill, outline=outline, width=3
+        )
+
+        # orbiting arcs peel away early in the morph
+        spin = clamp(1 - e * 2.5)
+        if spin > 0:
+            ar = R + 20
+            f = self.splash_frame
+            col = lerp_color(TRANSPARENT, accent_color, spin)
+            for offset in (0, 180):
+                c.create_arc(cx - ar, cy - ar, cx + ar, cy + ar,
+                             start=-f * 7 + offset, extent=80,
+                             style="arc", outline=col, width=3)
+
+        # logo grows into the title card
+        glow_text(c, cx, cy - 6 * e, "VOLT",
+                  (FONT, int(lerp(18, 40, e)), BOLD),
+                  self.accent, fill,
+                  strength=1.0, spread=6, step=lerp(1.4, 1.9, e))
+
+        sub = clamp((e - 0.55) * 2.2)
+        if sub > 0:
+            c.create_text(cx, cy + 38, text="SYSTEM MONITOR",
+                          fill=lerp_color(BG, MUTED, sub),
+                          font=(FONT, 11))
 
     def finish_splash(self):
-        self.attributes("-alpha", 0.0)
         self.splash.destroy()
+        # the window is now fully covered by the UI: drop the see-through key
+        self.attributes("-transparentcolor", "")
+        self.configure(fg_color=BG)
         self.start_monitoring()
-        if self.reduce_motion:
-            self.attributes("-alpha", 1.0)
-        else:
-            self.fade_in(0.0)
 
     # ---------------------------------------------------------------
     # Live data + smooth animation
     # ---------------------------------------------------------------
 
     def start_monitoring(self):
+        # baseline readings for the speed calculation
         self.prev_sent = net.get_bytes_sent()
         self.prev_recv = net.get_bytes_receieved()
         self.prev_time = time.time()
         self._last_frame = time.perf_counter()
-        self.poll_stats()
-        self.animate_loop()
+
+        self.poll_stats()      # takes real readings once per UPDATE_MS
+        self.animate_loop()    # glides the display towards those readings
 
     def poll_stats(self):
+        """Take real readings. These only set targets; the animation loop
+        eases the displayed values towards them."""
         try:
             self.after(UPDATE_MS, self.poll_stats)
 
@@ -1704,6 +1674,7 @@ class RevoltApp(ctk.CTk):
             gpu = self.gpu.util if self.gpu.available else 0.0
             self.target.update(cpu=cpu, mem=mem, disk=disk, gpu=gpu)
 
+            # history charts keep collecting even while their page is hidden
             for key, value in (("cpu", cpu), ("mem", mem), ("gpu", gpu)):
                 chart = self.hist_charts.get(key)
                 if chart:
@@ -1711,29 +1682,30 @@ class RevoltApp(ctk.CTk):
 
             self.pages[self.current].poll()
         except tk.TclError:
-            pass
+            pass  # window closed
 
     def animate_loop(self):
         try:
             self.after(FRAME_DELAY, self.animate_loop)
+
             now = time.perf_counter()
             dt = min(now - self._last_frame, 0.1)
             self._last_frame = now
 
+            # frame-rate independent exponential easing
             a = 1 - math.exp(-SMOOTHING * dt)
             for k in self.disp:
                 self.disp[k] += (self.target[k] - self.disp[k]) * a
 
             self.pages[self.current].tick(dt)
         except tk.TclError:
-            pass
+            pass  # window closed
 
     # ---------------------------------------------------------------
-    # Page switching (glide-in + sliding sidebar pill)
+    # Page switching (with a short glide-in)
     # ---------------------------------------------------------------
 
     def show_page(self, name, animate=True):
-        animate = animate and not self.reduce_motion
         if animate and name == self.current and self.pages[name].winfo_ismapped():
             return
 
@@ -1746,7 +1718,7 @@ class RevoltApp(ctk.CTk):
         offset = PAGE_SLIDE_PX * self.ui_scale if animate else 0
         page.place(x=0, y=int(offset), relwidth=1, relheight=1)
 
-        self.nav.select(name, animate=animate)
+        self.set_active(name)
         page.on_show()
         self.update_idletasks()
         self.refresh_stale()
@@ -1767,6 +1739,10 @@ class RevoltApp(ctk.CTk):
             pass
 
     def refresh_stale(self):
+        """Redraw anything whose accent colour changed while it was hidden."""
+        for label in self.glow_labels:
+            if label.stale and label.winfo_viewable():
+                label._render()
         for gauge in self.all_gauges:
             if gauge.stale and gauge.winfo_viewable():
                 gauge.refresh()
@@ -1776,29 +1752,138 @@ class RevoltApp(ctk.CTk):
     # ---------------------------------------------------------------
 
     def create_titlebar(self):
-        bar = ctk.CTkFrame(self.container, height=TITLEBAR_H,
-                           corner_radius=0, fg_color=BG)
+
+        bar = ctk.CTkFrame(
+            self.container,
+            height=TITLEBAR_H,
+            corner_radius=0,
+            fg_color=PANEL
+        )
         bar.pack(side="top", fill="x", padx=1, pady=(1, 0))
         bar.pack_propagate(False)
 
-        self.lights = TrafficLights(
-            bar, BG, (self.close, self.minimize, self.toggle_maximize),
-            self.ui_scale)
-        self.lights.pack(side="left", padx=(18, 0))
+        title = ctk.CTkLabel(
+            bar,
+            text="VOLT   ·   System Monitor",
+            font=(FONT, 11),
+            text_color=MUTED
+        )
+        title.pack(side="left", padx=16)
 
-        title = ctk.CTkLabel(bar, text="Volt", font=(FONT, 13, BOLD),
-                             text_color=MUTED)
-        title.place(relx=0.5, rely=0.5, anchor="center")
+        def make_btn(glyph, command, hover):
+            btn = ctk.CTkButton(
+                bar,
+                text=glyph,
+                width=46,
+                height=TITLEBAR_H,
+                corner_radius=0,
+                fg_color="transparent",
+                hover_color=hover,
+                text_color="#D4D4D4",
+                font=(ICON_FONT, 10),
+                command=command
+            )
+            btn.pack(side="right")
+            return btn
 
+        # packed right-to-left: close, maximize, minimize
+        make_btn("\uE8BB", self.close, "#E81123")
+        self.max_btn = make_btn("\uE922", self.toggle_maximize, "#1A1A1A")
+        make_btn("\uE921", self.minimize, "#1A1A1A")
+
+        # drag the window by the bar, double-click to maximize
         for widget in (bar, title):
             widget.bind("<ButtonPress-1>", self.start_move)
             widget.bind("<B1-Motion>", self.do_move)
             widget.bind("<Double-Button-1>", lambda e: self.toggle_maximize())
 
+    def draw_logo(self, phase=0.0):
+        try:
+            c = self.logo_canvas
+            c.delete("all")
+            strength = 0.7 + 0.3 * math.sin(phase)  # slow breathing glow
+            glow_text(c, 110, 26, "VOLT", (FONT, 27, BOLD),
+                      self.accent, PANEL, strength=strength,
+                      spread=5, step=1.3)
+            self.after(50, lambda: self.draw_logo(phase + 0.12))
+        except tk.TclError:
+            pass  # window closed
+
+    def set_active(self, name):
+        for n, (indicator, btn) in self.nav_items.items():
+            active = n == name
+            indicator.configure(fg_color=self.accent if active else PANEL)
+            btn.configure(
+                fg_color="#161616" if active else "transparent",
+                text_color=self.accent if active else MUTED
+            )
+
+    def create_sidebar(self):
+
+        self.sidebar = ctk.CTkFrame(
+            self.body,
+            width=220,
+            corner_radius=0,
+            fg_color=PANEL
+        )
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+
+        # Canvas logo so it can glow (labels can't)
+        self.logo_canvas = tk.Canvas(
+            self.sidebar,
+            width=220,
+            height=52,
+            bg=PANEL,
+            highlightthickness=0,
+            bd=0
+        )
+        self.logo_canvas.pack(pady=(28, 4))
+        self.draw_logo()
+
+        ctk.CTkLabel(
+            self.sidebar,
+            text="S Y S T E M   M O N I T O R",
+            font=(FONT, 9),
+            text_color=DIM
+        ).pack(pady=(0, 38))
+
+        for name in self.PAGE_NAMES:
+
+            row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            row.pack(fill="x", padx=(0, 14), pady=2)
+
+            indicator = ctk.CTkFrame(
+                row, width=3, height=20, corner_radius=2, fg_color=PANEL)
+            indicator.pack(side="left", padx=(0, 9))
+
+            btn = ctk.CTkButton(
+                row,
+                text=name,
+                height=40,
+                anchor="w",
+                fg_color="transparent",
+                text_color=MUTED,
+                hover_color="#121212",
+                corner_radius=8,
+                font=(FONT, 13),
+                command=lambda n=name: self.show_page(n)
+            )
+            btn.pack(side="left", fill="x", expand=True)
+            self.nav_items[name] = (indicator, btn)
+
+        self.set_active("Overview")
+
+        ctk.CTkLabel(
+            self.sidebar,
+            text="Volt v1.0.0",
+            text_color=DIM,
+            font=(FONT, 10)
+        ).pack(side="bottom", pady=20)
+
     def create_pages(self):
         self.main = ctk.CTkFrame(self.body, fg_color="transparent")
-        self.main.pack(side="left", fill="both", expand=True,
-                       padx=30, pady=(10, 26))
+        self.main.pack(side="left", fill="both", expand=True, padx=32, pady=26)
 
         self.pages = {
             "Overview": OverviewPage(self, self.main),
@@ -1811,101 +1896,109 @@ class RevoltApp(ctk.CTk):
         self.show_page("Overview", animate=False)
 
     def make_card(self, parent):
-        return ctk.CTkFrame(parent, fg_color=CARD, corner_radius=20,
-                            border_width=0)
+        return ctk.CTkFrame(
+            parent,
+            fg_color=CARD,
+            corner_radius=16,
+            border_width=1,
+            border_color=BORDER
+        )
 
-    def card_title(self, card, text, color=None, pady=(18, 0)):
-        """Small bold widget header. color=None follows the accent."""
-        label = ctk.CTkLabel(card, text=text, text_color=color or self.accent,
-                             font=(FONT, 13, BOLD))
-        label.pack(anchor="w", padx=22, pady=pady)
-        if color is None:
-            self.accent_widgets.append(label)
+    def glow_label(self, parent, text, size, bg, width=240, **kw):
+        """GlowLabel registered for accent recolouring."""
+        label = GlowLabel(parent, text, size, bg, scale=self.ui_scale,
+                          width=width, color=self.accent, **kw)
+        self.glow_labels.append(label)
         return label
 
     def page_title(self, parent, text):
-        label = ctk.CTkLabel(parent, text=text, text_color=TEXT,
-                             font=(FONT, 34, BOLD))
-        label.pack(anchor="w", pady=(0, 16))
+        label = self.glow_label(parent, text, 30, BG, width=420,
+                                spread=5, step=1.3, strength=0.95)
+        label.pack(anchor="w", pady=(0, 18))
         return label
 
     def make_chart(self, parent, **kw):
+        """SparkChart registered for accent recolouring."""
         height = kw.pop("height", 110)
         chart = SparkChart(parent, CARD, scale=self.ui_scale, height=height,
                            accent=self.accent, **kw)
         self.all_charts.append(chart)
         return chart
 
-    def legend_dot(self, parent, color):
-        dot = ctk.CTkFrame(parent, width=9, height=9, corner_radius=5,
-                           fg_color=color or self.accent)
-        self.accent_dots.append((dot, color))
+    def legend_dot(self, parent, mix):
+        dot = ctk.CTkFrame(
+            parent, width=8, height=8, corner_radius=4,
+            fg_color=lerp_color(CARD, self.accent, mix))
+        self.accent_dots.append((dot, mix))
         return dot
 
-    def gauge_card(self, parent, title, caption, color=None, size=152):
+    def gauge_card(self, parent, title, caption, size=152):
+        """Returns (card, gauge). The caller decides how to place the card."""
         card = self.make_card(parent)
-        self.card_title(card, title, color)
+
+        ctk.CTkLabel(
+            card, text=title, text_color=MUTED, font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 0))
+
         gauge = RingGauge(card, size, CARD, scale=self.ui_scale,
-                          accent=self.accent, color=color)
-        gauge.pack(pady=(6, 0))
+                          accent=self.accent)
+        gauge.pack(pady=(4, 0))
         self.all_gauges.append(gauge)
-        ctk.CTkLabel(card, text=caption, text_color=MUTED,
-                     font=(FONT, 12)).pack(pady=(2, 16))
+
+        ctk.CTkLabel(
+            card, text=caption, text_color=DIM, font=(FONT, 11)
+        ).pack(pady=(0, 16))
         return card, gauge
 
-    def info_rows(self, parent, rows, row_pad=10, pad_x=22):
-        """iOS-style list rows: label left, grey value right, inset separators."""
+    def info_rows(self, parent, rows, row_pad=9, pad_x=22):
+        """Label/value rows with thin separators. Returns {key: value_label}."""
         labels = {}
         for i, (key, value) in enumerate(rows):
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", padx=pad_x, pady=row_pad)
-            ctk.CTkLabel(row, text=key, text_color=TEXT,
-                         font=(FONT, 14)).pack(side="left")
-            value_label = ctk.CTkLabel(row, text=value, text_color=MUTED,
-                                       font=(FONT, 14))
+
+            ctk.CTkLabel(
+                row, text=key, text_color=MUTED, font=(FONT, 12)
+            ).pack(side="left")
+
+            value_label = ctk.CTkLabel(
+                row, text=value, text_color=self.accent,
+                font=(FONT, 13, BOLD))
             value_label.pack(side="right")
             labels[key] = value_label
+            self.accent_widgets.append(value_label)
+
             if i < len(rows) - 1:
-                ctk.CTkFrame(parent, height=1, corner_radius=0,
-                             fg_color=SEP).pack(fill="x", padx=pad_x)
+                ctk.CTkFrame(
+                    parent, height=1, corner_radius=0, fg_color=BORDER
+                ).pack(fill="x", padx=pad_x)
         return labels
 
     def info_card(self, parent, title, rows):
+        """Card with a title and label/value rows. Returns (card, labels)."""
         card = self.make_card(parent)
-        self.card_title(card, title, MUTED, pady=(18, 4))
+        ctk.CTkLabel(
+            card, text=title, text_color=MUTED, font=(FONT, 11, BOLD)
+        ).pack(anchor="w", padx=22, pady=(18, 6))
         labels = self.info_rows(card, rows)
         ctk.CTkFrame(card, height=10, fg_color="transparent").pack()
         return card, labels
 
-    def list_row(self, parent, title, subtitle=None, separator=True):
-        """Settings row with a slot on the right for a control."""
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=22, pady=(10, 10))
-        left = ctk.CTkFrame(row, fg_color="transparent")
-        left.pack(side="left")
-        ctk.CTkLabel(left, text=title, text_color=TEXT,
-                     font=(FONT, 14)).pack(anchor="w")
-        if subtitle:
-            ctk.CTkLabel(left, text=subtitle, text_color=MUTED,
-                         font=(FONT, 12)).pack(anchor="w")
-        right = ctk.CTkFrame(row, fg_color="transparent")
-        right.pack(side="right")
-        if separator:
-            ctk.CTkFrame(parent, height=1, corner_radius=0,
-                         fg_color=SEP).pack(fill="x", padx=22)
-        return right
-
-    def net_stat(self, parent, title, color, column):
+    def net_stat(self, parent, title, dot_mix, column):
         cell = ctk.CTkFrame(parent, fg_color="transparent")
         cell.grid(row=0, column=column, sticky="w")
 
         legend = ctk.CTkFrame(cell, fg_color="transparent")
         legend.pack(anchor="w")
-        self.legend_dot(legend, color).pack(side="left", padx=(0, 7))
-        ctk.CTkLabel(legend, text=title, text_color=MUTED,
-                     font=(FONT, 11, BOLD)).pack(side="left")
 
-        label = ValueLabel(cell, "0 B/s", 26)
+        self.legend_dot(legend, dot_mix).pack(side="left", padx=(0, 7))
+
+        ctk.CTkLabel(
+            legend, text=title, text_color=MUTED, font=(FONT, 10, BOLD)
+        ).pack(side="left")
+
+        label = self.glow_label(cell, "0 B/s", 27, CARD, width=200,
+                                spread=4, step=1.2)
         label.pack(anchor="w", pady=(2, 0))
         return label
 

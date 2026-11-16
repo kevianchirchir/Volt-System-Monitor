@@ -4,7 +4,7 @@ class SystemMonitor:
         pass
     
     def get_cpu_usage(self):
-        return psutil.cpu_percent(interval=0)
+        return psutil.cpu_percent(interval=0.1)
     
     def get_memory_usage(self):
         return psutil.virtual_memory().percent
