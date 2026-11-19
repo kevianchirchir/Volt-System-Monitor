@@ -16,5 +16,5 @@ class GPUMonitor:
         return pynvml.nvmlDeviceGetMemoryInfo(self.gpu)
     
     
-game = GPUMonitor()
+
 

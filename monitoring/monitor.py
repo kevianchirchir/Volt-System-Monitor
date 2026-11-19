@@ -18,7 +18,10 @@ class SystemMonitor:
     def get_cpu_frequency(self):
         return psutil.cpu_freq()
 
+    def get_logical_core_count(self):
+        return psutil.cpu_count(logical=True)
+    
     def get_core_count(self):
-        return psutil.cpu_count()
+        return psutil.cpu_count(logical=False)
+
      
-print(psutil.sensors_)

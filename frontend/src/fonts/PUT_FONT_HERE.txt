@@ -1,0 +1,1 @@
+Put sharkgotyourhand.ttf in this folder (src/fonts/).

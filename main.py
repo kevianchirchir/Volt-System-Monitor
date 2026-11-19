@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import time
 
 import webview
@@ -11,6 +12,13 @@ from monitoring.GPUMonitor import GPUMonitor
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS = os.path.join(BASE, "volt_settings.json")
+FRONTEND = os.path.join(BASE, "frontend")
+
+# Dev mode (python main.py --dev) loads your running dev server, so edits in
+# frontend/src show up instantly. Vite uses 5173; Create React App uses 3000
+# (set VOLT_DEV_URL=http://localhost:3000 for that).
+DEV_URL = os.environ.get("VOLT_DEV_URL", "http://localhost:5173")
+
 window = None
 
 
@@ -30,6 +38,15 @@ def byte_conversion(n):
     if n >= 1024:
         return f"{n / 1024:.0f} KB"
     return f"{n:.0f} B"
+
+
+def find_built_frontend():
+    """The built React app: frontend/dist (Vite) or frontend/build (CRA)."""
+    for folder in ("dist", "build"):
+        index = os.path.join(FRONTEND, folder, "index.html")
+        if os.path.exists(index):
+            return index
+    return None
 
 
 class Api:
@@ -105,10 +122,25 @@ class Api:
 
 
 if __name__ == "__main__":
+    dev = "--dev" in sys.argv
+
+    if dev:
+        url = DEV_URL
+    else:
+        url = find_built_frontend()
+        if url is None:
+            sys.exit(
+                "No built React app found in frontend/dist or frontend/build.\n"
+                "Build it first:   cd frontend  &&  npm run build\n"
+                "or run in dev mode:   npm run dev   (in frontend/)   then   python main.py --dev")
+
     window = webview.create_window(
         "VOLT | System Monitor",
-        os.path.join(BASE, "web", "index.html"),
+        url,
         js_api=Api(),
         width=1100, height=700, min_size=(950, 600),
         frameless=True, easy_drag=False, background_color="#050505")
-    webview.start()
+
+    # http_server=True serves the built files over local HTTP, so the absolute
+    # /assets/... paths in a normal Vite or CRA build load correctly.
+    webview.start(http_server=not dev)
